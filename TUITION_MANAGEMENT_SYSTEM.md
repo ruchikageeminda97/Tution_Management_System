@@ -17,6 +17,7 @@ Table organizations {
   oid          integer  [pk, increment, note: 'Auto generated org id']
   name         varchar  [not null]
   contact      varchar
+  image_directory varchar [note: 'Local folder used for student photo files']
   created_at   datetime [default: `CURRENT_TIMESTAMP`]
 
   Note: 'The root tenant. Every other table is scoped to an oid so many organizations can share one database file.'
@@ -43,6 +44,7 @@ Table students {
   contact2     varchar
   birthday     date
   address      varchar
+  photo_path   varchar  [note: 'Local image file path; image bytes are not stored in SQLite']
   status       varchar  [default: 'active', note: 'active / inactive']
   created_at   datetime [default: `CURRENT_TIMESTAMP`]
 
@@ -354,6 +356,9 @@ exactly.
 **Local backup**
 - "Backup Now" copies the single SQLite file (`app.db`) to a user-chosen folder with a
   timestamped name, e.g. `tuition_backup_2026-09-26_1830.db`, and logs it in `backup_logs`.
+- Student image files are stored in the configured local image directory and are not part
+  of the SQLite backup. The database contains their paths; keep the image directory when
+  moving or restoring a workspace if the photos are needed.
 - **Import/restore**: "Restore from file" → file picker → validate it's a real SQLite file
   with the expected tables (quick `PRAGMA table_info` check) → close current DB connection →
   copy the chosen file over `app.db` → reopen. Always auto-backup the *current* file first,

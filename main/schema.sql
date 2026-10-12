@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS organizations (
   name TEXT NOT NULL,
   contact TEXT,
   payment_due_day INTEGER CHECK (payment_due_day BETWEEN 1 AND 31),
+  image_directory TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -25,7 +26,7 @@ CREATE TABLE IF NOT EXISTS students (
   contact2 TEXT,
   birthday TEXT,
   address TEXT,
-  photo_data TEXT,
+  photo_path TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

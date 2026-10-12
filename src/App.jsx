@@ -258,7 +258,25 @@ function App() {
         <span>Loading your workspace…</span>
       </div>
     );
-  if (!user) return <AuthScreen setup={setup} onSubmit={signIn} />;
+  const recoverAccount = async (values) => {
+    const account = await api.auth.recover(values);
+    setUser(account);
+    setPage("overview");
+  };
+  const resetDatabase = async () => {
+    const result = await api.auth.resetDatabase();
+    if (result.reset) setSetup(true);
+    return result.reset;
+  };
+  if (!user)
+    return (
+      <AuthScreen
+        setup={setup}
+        onSubmit={signIn}
+        onRecover={recoverAccount}
+        onResetDatabase={resetDatabase}
+      />
+    );
 
   const pageNames = {
     overview: "Overview",
@@ -503,27 +521,69 @@ class Boundary extends React.Component {
   }
 }
 
-function AuthScreen({ setup, onSubmit }) {
+function AuthScreen({ setup, onSubmit, onRecover, onResetDatabase }) {
   const [form, setForm] = useState({
     organization: "",
     username: "",
     password: "",
     contact: "",
   });
+  const [recoveryForm, setRecoveryForm] = useState({
+    organization: "",
+    contact: "",
+    username: "",
+    password: "",
+  });
+  const [recovering, setRecovering] = useState(false);
+  const [imageDirectory, setImageDirectory] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const update = (key) => (event) =>
     setForm((old) => ({ ...old, [key]: event.target.value }));
+  const updateRecovery = (key) => (event) =>
+    setRecoveryForm((old) => ({ ...old, [key]: event.target.value }));
   const submit = async (event) => {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      await onSubmit(form);
+      await onSubmit(setup ? { ...form, image_directory: imageDirectory } : form);
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy(false);
+    }
+  };
+  const recover = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await onRecover(recoveryForm);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const reset = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await onResetDatabase();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const chooseImageDirectory = async () => {
+    setError("");
+    try {
+      const result = await api.images.chooseDirectory(imageDirectory);
+      if (!result.canceled) setImageDirectory(result.directory);
+    } catch (err) {
+      setError(err.message);
     }
   };
   return (
@@ -539,59 +599,156 @@ function AuthScreen({ setup, onSubmit }) {
         </div>
         <div className="auth-heading">
           <span className="eyebrow">
-            {setup ? "LET’S GET STARTED" : "WELCOME BACK"}
+            {setup
+              ? "LET’S GET STARTED"
+              : recovering
+                ? "ACCOUNT RECOVERY"
+                : "WELCOME BACK"}
           </span>
           <h1>
-            {setup ? "Set up your workspace" : "Sign in to your workspace"}
+            {setup
+              ? "Set up your workspace"
+              : recovering
+                ? "Claim your existing account"
+                : "Sign in to your workspace"}
           </h1>
           <p>
             {setup
               ? "Create your tuition centre account to get started. Your data stays safely on this device."
-              : "Enter your account details to continue managing your classes."}
+              : recovering
+                ? "Verify the tuition centre name and contact number saved on this device, then choose new sign-in details."
+                : "Enter your username and password to continue managing your classes."}
           </p>
         </div>
-        <form onSubmit={submit} className="auth-form">
-          {setup && (
-            <>
-              <Field
-                label="Tuition centre name"
-                required
-                value={form.organization}
-                onChange={update("organization")}
-                placeholder="e.g. Bright Future Academy"
-              />
-              <Field
-                label="Contact number"
-                value={form.contact}
-                onChange={update("contact")}
-                placeholder="Optional"
-              />
-            </>
-          )}
-          <Field
-            label="Username"
-            required
-            autoComplete="username"
-            value={form.username}
-            onChange={update("username")}
-            placeholder="Your username"
-          />
-          <Field
-            label="Password"
-            required
-            type="password"
-            autoComplete={setup ? "new-password" : "current-password"}
-            minLength={setup ? 8 : undefined}
-            value={form.password}
-            onChange={update("password")}
-            placeholder={setup ? "At least 8 characters" : "Your password"}
-          />
-          {error && <div className="form-error">{error}</div>}
-          <button className="button button-primary auth-submit" disabled={busy}>
-            {busy ? "Please wait…" : setup ? "Create workspace" : "Sign in"}
-            <ArrowRight size={16} />
-          </button>
-        </form>
+        {recovering && !setup ? (
+          <form onSubmit={recover} className="auth-form">
+            <Field
+              label="Tuition centre name"
+              required
+              value={recoveryForm.organization}
+              onChange={updateRecovery("organization")}
+              placeholder="Name saved during setup"
+            />
+            <Field
+              label="Contact number on file"
+              value={recoveryForm.contact}
+              onChange={updateRecovery("contact")}
+              placeholder="Leave blank if none was saved"
+            />
+            <Field
+              label="New username"
+              required
+              autoComplete="username"
+              value={recoveryForm.username}
+              onChange={updateRecovery("username")}
+              placeholder="Choose a username"
+            />
+            <Field
+              label="New password"
+              required
+              type="password"
+              autoComplete="new-password"
+              minLength={8}
+              value={recoveryForm.password}
+              onChange={updateRecovery("password")}
+              placeholder="At least 8 characters"
+            />
+            {error && <div className="form-error">{error}</div>}
+            <button className="button button-primary auth-submit" disabled={busy}>
+              {busy ? "Please wait…" : "Claim account"}
+              <ArrowRight size={16} />
+            </button>
+            <p className="auth-recovery-note">
+              This resets the administrator sign-in on this device using saved
+              workspace details, not email verification. Leave the contact
+              blank only if none was saved during setup.
+            </p>
+            <button
+              type="button"
+              className="auth-recovery-link"
+              onClick={() => {
+                setRecovering(false);
+                setError("");
+              }}
+            >
+              Back to sign in
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={submit} className="auth-form">
+            {setup && (
+              <>
+                <Field
+                  label="Tuition centre name"
+                  required
+                  value={form.organization}
+                  onChange={update("organization")}
+                  placeholder="e.g. Bright Future Academy"
+                />
+                <Field
+                  label="Contact number"
+                  value={form.contact}
+                  onChange={update("contact")}
+                  placeholder="Optional"
+                />
+                <Field label="Student photo storage folder" required>
+                  <div className="directory-picker">
+                    <input readOnly value={imageDirectory} placeholder="Choose a local folder for student photos" />
+                    <Button kind="secondary" type="button" onClick={chooseImageDirectory} disabled={busy}>
+                      Choose folder
+                    </Button>
+                  </div>
+                  <small>Student photos are stored outside the database and are not included in backups.</small>
+                </Field>
+              </>
+            )}
+            <Field
+              label="Username"
+              required
+              autoComplete="username"
+              value={form.username}
+              onChange={update("username")}
+              placeholder="Your username"
+            />
+            <Field
+              label="Password"
+              required
+              type="password"
+              autoComplete={setup ? "new-password" : "current-password"}
+              minLength={setup ? 8 : undefined}
+              value={form.password}
+              onChange={update("password")}
+              placeholder={setup ? "At least 8 characters" : "Your password"}
+            />
+            {error && <div className="form-error">{error}</div>}
+            <button className="button button-primary auth-submit" disabled={busy}>
+              {busy ? "Please wait…" : setup ? "Create workspace" : "Sign in"}
+              <ArrowRight size={16} />
+            </button>
+            {!setup && (
+              <>
+                <button
+                  type="button"
+                  className="auth-recovery-link"
+                  onClick={() => {
+                    setRecovering(true);
+                    setError("");
+                  }}
+                >
+                  Forgot your username or password? Claim this account
+                </button>
+                <button
+                  type="button"
+                  className="auth-reset-link"
+                  disabled={busy}
+                  onClick={reset}
+                >
+                  Reset all local data and start over
+                </button>
+              </>
+            )}
+          </form>
+        )}
         <div className="auth-security">
           <ShieldCheck size={16} />
           <span>Your data is stored securely on this device</span>
@@ -3197,10 +3354,15 @@ function ReportsPage({ version, setModal, notify, user }) {
 function SettingsPage({ user, setUser, notify, refresh }) {
   const { data, error } = useLoad(() => api.settings.organization(), []);
   const [form, setForm] = useState(null);
+  const [imageDirectory, setImageDirectory] = useState("");
   useEffect(() => {
-    if (data) setForm(data);
+    if (data) {
+      setForm(data);
+      setImageDirectory(data.image_directory || "");
+    }
   }, [data]);
   const [busy, setBusy] = useState(false);
+  const [imageDirectoryBusy, setImageDirectoryBusy] = useState(false);
   const save = async (event) => {
     event.preventDefault();
     setBusy(true);
@@ -3232,6 +3394,27 @@ function SettingsPage({ user, setUser, notify, refresh }) {
       }
     } catch (err) {
       notify(err.message, "error");
+    }
+  };
+  const chooseImageDirectory = async () => {
+    try {
+      const result = await api.images.chooseDirectory(imageDirectory);
+      if (!result.canceled) setImageDirectory(result.directory);
+    } catch (err) {
+      notify(err.message, "error");
+    }
+  };
+  const saveImageDirectory = async () => {
+    setImageDirectoryBusy(true);
+    try {
+      const directory = await api.settings.saveImageDirectory(imageDirectory);
+      setImageDirectory(directory);
+      setForm((current) => ({ ...current, image_directory: directory }));
+      notify("Student photo folder updated. Existing photos were moved.");
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setImageDirectoryBusy(false);
     }
   };
   return (
@@ -3301,6 +3484,33 @@ function SettingsPage({ user, setUser, notify, refresh }) {
         </section>
         <section className="panel settings-card">
           <div className="settings-card-heading">
+            <div className="settings-icon settings-icon-purple">
+              <Users size={19} />
+            </div>
+            <div>
+              <h2>Student photo storage</h2>
+              <p>Choose where student photos are stored on this computer.</p>
+            </div>
+          </div>
+          <div className="settings-form">
+            <Field label="Image folder" required>
+              <div className="directory-picker">
+                <input readOnly value={imageDirectory} placeholder="Choose a local folder" />
+                <Button kind="secondary" type="button" onClick={chooseImageDirectory} disabled={imageDirectoryBusy}>
+                  Choose folder
+                </Button>
+              </div>
+              <small>Changing this location moves existing student photos. Photos are stored outside the database and are not included in backups.</small>
+            </Field>
+            <div className="settings-actions">
+              <Button onClick={saveImageDirectory} disabled={imageDirectoryBusy || !imageDirectory}>
+                {imageDirectoryBusy ? "Moving photos…" : "Save photo location"}
+              </Button>
+            </div>
+          </div>
+        </section>
+        <section className="panel settings-card">
+          <div className="settings-card-heading">
             <div className="settings-icon settings-icon-green">
               <ShieldCheck size={19} />
             </div>
@@ -3314,7 +3524,7 @@ function SettingsPage({ user, setUser, notify, refresh }) {
               <Download size={17} />
               <div>
                 <b>Download a backup</b>
-                <span>Save a SQLite copy to a folder you choose.</span>
+                <span>Save a SQLite copy to a folder you choose. Student photos are not included.</span>
               </div>
             </div>
             <Button kind="secondary" icon={ArrowDownToLine} onClick={backup}>

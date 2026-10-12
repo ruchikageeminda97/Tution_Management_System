@@ -9,10 +9,16 @@ const { dueDateForMonth, overduePaymentMonths } = require('../main/payment-due')
 const { buildAttendanceReportHtml } = require('../main/attendance-report');
 const { buildDailySummaryReportHtml } = require('../main/daily-summary-report');
 const { buildClassPaymentReportHtml } = require('../main/class-payment-report');
-const { openDatabase } = require('../main/database');
+const { openDatabase, resetDatabase } = require('../main/database');
 const { recordPaymentReceipt, listRecentPaymentReceipts } = require('../main/payment-receipt');
 const { buildPaymentReceiptHtml, buildCode39Svg } = require('../main/payment-receipt-report');
 const { completeOngoingSession, endExpiredSessions } = require('../main/session-lifecycle');
+const { recoverExistingAdmin } = require('../main/account-recovery');
+const {
+  changeImageDirectory,
+  migrateLegacyStudentPhotos,
+  readStudentImage
+} = require('../main/student-images');
 
 function createDatabase() {
   const db = new Database(':memory:');
@@ -29,6 +35,86 @@ function seed(db) {
   return { organization, teacher, student, classId, enrollment };
 }
 
+test('database reset clears all application records and allows fresh setup', () => {
+  const db = createDatabase();
+  try {
+    const records = seed(db);
+    db.prepare('INSERT INTO users (oid,username,password_hash,role) VALUES (?,?,?,?)')
+      .run(records.organization, 'admin', 'hash', 'admin');
+    assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
+
+    resetDatabase(db);
+
+    assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
+    for (const table of ['organizations', 'users', 'students', 'teachers', 'classes', 'payments', 'attendance']) {
+      assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM "${table}"`).get().count, 0, `${table} should be empty`);
+    }
+    assert.equal(db.prepare('INSERT INTO organizations (name) VALUES (?)').run('Fresh Academy').lastInsertRowid, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test('account recovery verifies workspace contact and replaces administrator credentials', () => {
+  const db = createDatabase();
+  try {
+    const oid = db.prepare('INSERT INTO organizations (name,contact) VALUES (?,?)')
+      .run('Bright Academy', '555-0100').lastInsertRowid;
+    const userId = db.prepare('INSERT INTO users (oid,username,password_hash,role) VALUES (?,?,?,?)')
+      .run(oid, 'old-admin', 'old-hash', 'admin').lastInsertRowid;
+    const hashPassword = (password) => ({ salt: 'test-salt', hash: `hash-${password}` });
+
+    assert.throws(() => recoverExistingAdmin(db, {
+      organization: 'Bright Academy',
+      contact: '555-9999',
+      username: 'new-admin',
+      password: 'new-password'
+    }, hashPassword), /could not verify/);
+    assert.equal(db.prepare('SELECT username FROM users WHERE user_id=?').get(userId).username, 'old-admin');
+
+    const recovered = recoverExistingAdmin(db, {
+      organization: ' bright academy ',
+      contact: '555-0100',
+      username: 'new-admin',
+      password: 'new-password'
+    }, hashPassword);
+    assert.deepEqual(recovered, {
+      user_id: userId,
+      oid,
+      username: 'new-admin',
+      organization: 'Bright Academy',
+      role: 'admin'
+    });
+    assert.equal(
+      db.prepare('SELECT password_hash FROM users WHERE user_id=?').get(userId).password_hash,
+      'test-salt:hash-new-password'
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('account recovery still works when no workspace contact was saved', () => {
+  const db = createDatabase();
+  try {
+    const oid = db.prepare('INSERT INTO organizations (name) VALUES (?)')
+      .run('Local Academy').lastInsertRowid;
+    db.prepare('INSERT INTO users (oid,username,password_hash,role) VALUES (?,?,?,?)')
+      .run(oid, 'old-admin', 'old-hash', 'admin');
+
+    const recovered = recoverExistingAdmin(db, {
+      organization: 'Local Academy',
+      contact: '',
+      username: 'new-admin',
+      password: 'new-password'
+    }, (password) => ({ salt: 'test-salt', hash: `hash-${password}` }));
+    assert.equal(recovered.username, 'new-admin');
+    assert.equal(recovered.oid, oid);
+  } finally {
+    db.close();
+  }
+});
+
 test('schema creates the full tenant-scoped tuition management data model', () => {
   const db = createDatabase();
   try {
@@ -40,8 +126,10 @@ test('schema creates the full tenant-scoped tuition management data model', () =
     assert.ok(paymentColumns.has('receipt_id'));
     const organizationColumns = new Set(db.pragma('table_info(organizations)').map(column => column.name));
     assert.ok(organizationColumns.has('payment_due_day'));
+    assert.ok(organizationColumns.has('image_directory'));
     const studentColumns = new Set(db.pragma('table_info(students)').map(column => column.name));
-    assert.ok(studentColumns.has('photo_data'));
+    assert.ok(studentColumns.has('photo_path'));
+    assert.ok(!studentColumns.has('photo_data'));
     const sessionColumns = new Set(db.pragma('table_info(sessions)').map(column => column.name));
     assert.ok(sessionColumns.has('hall_id'));
     assert.ok(sessionColumns.has('is_special'));
@@ -136,7 +224,8 @@ test('opening an existing database migrates session timing and attendance punch 
       assert.ok(columns.has('ended_at'));
       assert.ok(columns.has('ended_automatically'));
       assert.equal(upgraded.prepare('SELECT payment_due_day FROM organizations WHERE oid=1').get().payment_due_day, 15);
-      assert.ok(new Set(upgraded.pragma('table_info(students)').map(column => column.name)).has('photo_data'));
+      assert.ok(new Set(upgraded.pragma('table_info(students)').map(column => column.name)).has('photo_path'));
+      assert.ok(new Set(upgraded.pragma('table_info(organizations)').map(column => column.name)).has('image_directory'));
       assert.ok(new Set(upgraded.pragma('table_info(attendance)').map(column => column.name)).has('present_at'));
       assert.ok(new Set(upgraded.pragma('table_info(payments)').map(column => column.name)).has('receipt_id'));
       assert.ok(upgraded.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='payment_receipts'").get());
@@ -146,6 +235,38 @@ test('opening an existing database migrates session timing and attendance punch 
       upgraded.close();
     }
   } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('legacy student photos migrate out of SQLite and change folders without losing files', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'tcms-student-images-'));
+  const db = createDatabase();
+  const pngData = `data:image/png;base64,${Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64')}`;
+  try {
+    const oldDirectory = path.join(directory, 'old-photos');
+    const newDirectory = path.join(directory, 'new-photos');
+    fs.mkdirSync(oldDirectory);
+    db.exec('ALTER TABLE students ADD COLUMN photo_data TEXT');
+    const oid = db.prepare('INSERT INTO organizations (name,image_directory) VALUES (?,?)').run('Photo Academy', oldDirectory).lastInsertRowid;
+    const stid = db.prepare('INSERT INTO students (oid,name,contact1,photo_data) VALUES (?,?,?,?)')
+      .run(oid, 'Taylor Student', '555-0100', pngData).lastInsertRowid;
+
+    migrateLegacyStudentPhotos(db, path.join(directory, 'default-photos'));
+
+    const migrated = db.prepare('SELECT photo_path FROM students WHERE stid=?').get(stid);
+    assert.equal(readStudentImage(migrated.photo_path), pngData);
+    assert.ok(!new Set(db.pragma('table_info(students)').map(column => column.name)).has('photo_data'));
+    assert.equal(db.prepare('SELECT image_directory FROM organizations WHERE oid=?').get(oid).image_directory, oldDirectory);
+
+    const relocated = changeImageDirectory(db, oid, newDirectory);
+    assert.equal(relocated, newDirectory);
+    const moved = db.prepare('SELECT photo_path FROM students WHERE stid=?').get(stid);
+    assert.equal(path.dirname(moved.photo_path), newDirectory);
+    assert.equal(readStudentImage(moved.photo_path), pngData);
+    assert.equal(fs.existsSync(migrated.photo_path), false);
+  } finally {
+    db.close();
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

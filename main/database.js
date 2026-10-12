@@ -15,9 +15,12 @@ function openDatabase(filePath) {
   if (!organizationColumns.has('payment_due_day')) {
     db.exec('ALTER TABLE organizations ADD COLUMN payment_due_day INTEGER CHECK (payment_due_day BETWEEN 1 AND 31)');
   }
+  if (!organizationColumns.has('image_directory')) {
+    db.exec('ALTER TABLE organizations ADD COLUMN image_directory TEXT');
+  }
   const studentColumns = new Set(db.pragma('table_info(students)').map(column => column.name));
-  if (!studentColumns.has('photo_data')) {
-    db.exec('ALTER TABLE students ADD COLUMN photo_data TEXT');
+  if (!studentColumns.has('photo_path')) {
+    db.exec('ALTER TABLE students ADD COLUMN photo_path TEXT');
   }
   const paymentColumns = new Set(db.pragma('table_info(payments)').map(column => column.name));
   if (!paymentColumns.has('receipt_id')) {
@@ -83,4 +86,25 @@ function getDatabase() {
   return db;
 }
 
-module.exports = { openDatabase, getDatabase };
+function resetDatabase(database = getDatabase()) {
+  const foreignKeysEnabled = database.pragma('foreign_keys', { simple: true });
+  const tables = database.prepare(`SELECT name FROM sqlite_master
+    WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all().map(row => row.name);
+  const reset = database.transaction(() => {
+    for (const table of tables) {
+      database.prepare(`DELETE FROM "${table.replace(/"/g, '""')}"`).run();
+    }
+    const hasSequence = database.prepare(`SELECT 1 FROM sqlite_master
+      WHERE type='table' AND name='sqlite_sequence'`).get();
+    if (hasSequence) database.prepare('DELETE FROM sqlite_sequence').run();
+  });
+
+  if (foreignKeysEnabled) database.pragma('foreign_keys = OFF');
+  try {
+    reset();
+  } finally {
+    if (foreignKeysEnabled) database.pragma('foreign_keys = ON');
+  }
+}
+
+module.exports = { openDatabase, getDatabase, resetDatabase };

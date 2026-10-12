@@ -22,17 +22,19 @@ Student and teacher pages include downloadable Excel templates and `.xlsx` impor
 
 ## Included workflows
 
-- Student and teacher records with Excel (`.xlsx`) import and downloadable templates; student birth dates, contacts, optional profile photos and RFID-card assignment/search.
+- Student and teacher records with Excel (`.xlsx`) import and downloadable templates; student birth dates, contacts, optional profile photos stored as local image files and RFID-card assignment/search.
 - Class setup, weekly schedules, optional halls with editable weekly availability, student enrolments and individual fee discounts.
 - Session generation from the weekly timetable plus one-time special sessions with a chosen class, date, time and optional hall; selected halls are checked against weekly availability and overlapping bookings.
 - Attendance registers with automatic RFID scanning and student details, separate register-open/class-start/end steps with recorded timestamps, student arrival punches and late-minute tracking, automatic absent marking when a session ends, attendance PDF exports with class/teacher and attendance timing details, and a non-blocking yellow warning for unpaid monthly fees after the organization's recurring payment due day.
 - Monthly tuition collection from the payments screen or attendance register, with duplicate-payment protection.
 - Class earnings, outstanding fees, teacher commissions, organization shares and teacher-payout records, plus selectable-date daily summary PDFs covering receipts by class, teacher payouts, active students and session attendance. Printable A4 landscape annual payment-register PDFs have a separate ruled January–December sheet for each class.
-- Editable organization details, a recurring student payment due day (1–31), and local SQLite backup/validated restore. Restore first makes a safety copy of the active database.
+- Editable organization details, a recurring student payment due day (1–31), configurable local photo storage, and local SQLite backup/validated restore. Restore first makes a safety copy of the active database.
 
 ## Data and backup notes
 
 Each signed-in account is scoped to its organization. The database currently supports one initial administrator account per fresh installation; additional staff-account management is not yet exposed in the interface. Google Drive backup is also not configured: it requires a Google OAuth desktop client and secure token-storage setup, so the current backup workflow is local-file only.
+
+Choose a student-photo folder during first-time setup or later in Settings. Changing the folder moves existing photos there. Database backups contain student records and photo paths, but do not include the image files; keep the image folder when moving or restoring a workspace if photos must remain available.
 
 Amounts are displayed using the computer’s locale number formatting; the app does not yet store a currency code. Choose a consistent currency for records managed in this workspace. SQLite database files and local backups are not encrypted; keep backup files somewhere you trust.
 

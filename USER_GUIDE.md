@@ -4,11 +4,13 @@ This guide explains the day-to-day functions of the desktop app, in the order mo
 
 ## 1. First sign-in and navigation
 
-1. Open the desktop app. On a new installation, create the tuition centre workspace and administrator account; otherwise, sign in with the account already set up.
-2. Use the left navigation to open **Overview**, **Attendance**, **Payments**, **Reports**, **Students**, **Teachers**, **Classes**, or **Halls**. Open **Settings** near the bottom of the sidebar.
-3. On a smaller window, open the navigation drawer with the menu button.
-4. Use the search box in the top bar to enter an RFID card number and press **Enter**. If the card is assigned, the student profile opens. If it is not found, check the card number and its assignment on the Students page.
-5. Sign out from the account area in the sidebar or the avatar in the top bar.
+1. Open the desktop app. On a new installation, create the tuition centre workspace and administrator account, and choose a local folder for student photos; otherwise, sign in with the account already set up.
+2. Sign-in uses a username, not an email address. If you forget your username or password, choose **Forgot your username or password? Claim this account** and enter the workspace name and contact number saved on this computer. If no contact number was saved, leave that field blank. Recovery replaces the administrator username and password; it checks saved workspace details and does not verify identity through email.
+3. If you cannot recover the account, choose **Reset all local data and start over** on the sign-in screen. Confirm the warning to erase all app records on this computer and return to first-time setup. This is permanent; use a backup if you need to keep your data.
+4. Use the left navigation to open **Overview**, **Attendance**, **Payments**, **Reports**, **Students**, **Teachers**, **Classes**, or **Halls**. Open **Settings** near the bottom of the sidebar.
+5. On a smaller window, open the navigation drawer with the menu button.
+6. Use the search box in the top bar to enter an RFID card number and press **Enter**. If the card is assigned, the student profile opens. If it is not found, check the card number and its assignment on the Students page.
+7. Sign out from the account area in the sidebar or the avatar in the top bar.
 
 ## 2. Recommended setup order
 
@@ -212,12 +214,18 @@ At the top of Reports, choose a date in the daily-summary section and select its
 3. Optionally set the recurring student payment due day from 1 to 31, then save.
 4. After the due day, unpaid monthly fees may produce a yellow warning in attendance; the warning does not block attendance. The selected day is clamped to the last day in shorter months. Leave the due day blank to disable overdue warnings.
 
+### Student photo folder
+
+1. During first-time setup, choose the folder where student photos should be stored.
+2. To change it later, open **Settings → Student photo storage**, choose a folder and save. Existing photos are moved to the new folder.
+
 ### Back up or restore
 
 1. Open **Settings → Backup & restore**.
 2. Select **Back up now** and choose a folder and filename for a local database copy. Store the backup somewhere safe, preferably separate from the computer.
 3. To restore, select **Choose file** and choose a verified database backup. A safety copy of the current database is made before the restore.
 4. The app refreshes after a successful restore. Make sure you selected the intended backup because restoring replaces the current workspace data with the backup's data.
+5. Backups include database records and photo paths, not the actual image files. Keep the student photo folder when moving the app or restoring a backup if you need the photos.
 
 ## 12. Helpful operating notes
 

@@ -5,8 +5,11 @@ const invoke = (channel) => (...args) => ipcRenderer.invoke(channel, ...args);
 contextBridge.exposeInMainWorld('tuition', Object.freeze({
   auth: {
     status: invoke('auth:status'), setup: invoke('auth:setup'),
-    login: invoke('auth:login'), logout: invoke('auth:logout')
+    login: invoke('auth:login'), recover: invoke('auth:recover'),
+    resetDatabase: invoke('auth:resetDatabase'),
+    logout: invoke('auth:logout')
   },
+  images: { chooseDirectory: invoke('images:chooseDirectory') },
   dashboard: { get: invoke('dashboard:get') },
   students: {
     list: invoke('students:list'), save: invoke('students:save'), delete: invoke('students:delete'),
@@ -52,6 +55,10 @@ contextBridge.exposeInMainWorld('tuition', Object.freeze({
     exportDailySummaryPDF: invoke('reports:exportDailySummaryPDF')
   },
   payouts: { list: invoke('payouts:list'), add: invoke('payouts:add') },
-  settings: { organization: invoke('settings:organization'), saveOrganization: invoke('settings:saveOrganization') },
+  settings: {
+    organization: invoke('settings:organization'),
+    saveOrganization: invoke('settings:saveOrganization'),
+    saveImageDirectory: invoke('settings:saveImageDirectory')
+  },
   backup: { create: invoke('backup:create'), restore: invoke('backup:restore') }
 }));

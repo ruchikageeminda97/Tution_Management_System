@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { openDatabase, getDatabase } = require('./database');
+const { openDatabase, getDatabase, resetDatabase } = require('./database');
 const { overlaps, slotIsAvailable, validateSlots, validTime } = require('./scheduling');
 const { overduePaymentMonths } = require('./payment-due');
 const { buildAttendanceReportHtml } = require('./attendance-report');
@@ -12,6 +12,16 @@ const { createTemplateBuffer, parseExcelRecords } = require('./record-import');
 const { completeOngoingSession, endExpiredSessions } = require('./session-lifecycle');
 const { recordPaymentReceipt, listRecentPaymentReceipts } = require('./payment-receipt');
 const { buildPaymentReceiptHtml } = require('./payment-receipt-report');
+const { recoverExistingAdmin } = require('./account-recovery');
+const {
+  changeImageDirectory,
+  decodeImageData,
+  ensureImageDirectory,
+  migrateLegacyStudentPhotos,
+  readStudentImage,
+  removeFiles,
+  writeStudentImage
+} = require('./student-images');
 
 let window;
 let activeUser = null;
@@ -113,15 +123,26 @@ function registerIpc() {
     needsSetup: getDatabase().prepare('SELECT COUNT(*) AS count FROM users').get().count === 0,
     user: activeUser ? { username: activeUser.username, organization: activeUser.organization, role: activeUser.role } : null
   }));
+  ipcMain.handle('images:chooseDirectory', async (_event, currentPath) => {
+    const result = await dialog.showOpenDialog(window, {
+      title: 'Choose student photo folder',
+      defaultPath: typeof currentPath === 'string' && currentPath ? currentPath : app.getPath('userData'),
+      properties: ['openDirectory', 'createDirectory']
+    });
+    return result.canceled || !result.filePaths[0]
+      ? { canceled: true }
+      : { canceled: false, directory: result.filePaths[0] };
+  });
   ipcMain.handle('auth:setup', (_event, input) => {
     const name = String(input.organization || '').trim();
     const username = String(input.username || '').trim();
     const password = String(input.password || '');
     if (!name || !username || password.length < 8) throw new Error('Enter an organization, username, and password of at least 8 characters.');
+    const imageDirectory = ensureImageDirectory(input.image_directory);
     const database = getDatabase();
     const create = database.transaction(() => {
       if (database.prepare('SELECT 1 FROM users LIMIT 1').get()) throw new Error('Initial setup has already been completed. Sign in instead.');
-      const result = database.prepare('INSERT INTO organizations (name, contact) VALUES (?, ?)').run(name, String(input.contact || '').trim());
+      const result = database.prepare('INSERT INTO organizations (name, contact, image_directory) VALUES (?, ?, ?)').run(name, String(input.contact || '').trim(), imageDirectory);
       const credentials = hashPassword(password);
       const user = database.prepare('INSERT INTO users (oid, username, password_hash, role) VALUES (?, ?, ?, ?)').run(
         result.lastInsertRowid, username, `${credentials.salt}:${credentials.hash}`, 'admin'
@@ -141,6 +162,34 @@ function registerIpc() {
     activeUser = user;
     return { username: user.username, organization: user.organization, role: user.role };
   });
+  ipcMain.handle('auth:recover', (_event, input) => {
+    activeUser = recoverExistingAdmin(getDatabase(), input, hashPassword);
+    return {
+      username: activeUser.username,
+      organization: activeUser.organization,
+      role: activeUser.role
+    };
+  });
+  ipcMain.handle('auth:resetDatabase', async () => {
+    if (activeUser) throw new Error('Sign out before resetting the database.');
+    const result = await dialog.showMessageBox(window, {
+      type: 'warning',
+      title: 'Reset all local data?',
+      message: 'This permanently deletes all data in this app on this computer.',
+      detail: 'Workspaces, students, teachers, classes, attendance, payments, and backups recorded in the app will be erased. This cannot be undone.',
+      buttons: ['Cancel', 'Reset database'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    });
+    if (result.response !== 1) return { reset: false };
+    const photoPaths = getDatabase().prepare('SELECT photo_path FROM students WHERE photo_path IS NOT NULL').all()
+      .map(student => student.photo_path);
+    resetDatabase(getDatabase());
+    removeFiles(photoPaths);
+    activeUser = null;
+    return { reset: true };
+  });
   ipcMain.handle('auth:logout', () => { activeUser = null; return true; });
   ipcMain.handle('dashboard:get', () => {
     const oid = org();
@@ -159,9 +208,9 @@ function registerIpc() {
   ipcMain.handle('students:photo', (_event, stid) => {
     const studentId = Number(stid);
     if (!Number.isInteger(studentId) || studentId < 1) throw new Error('Choose a valid student.');
-    const student = getDatabase().prepare('SELECT photo_data FROM students WHERE stid=? AND oid=?').get(studentId, org());
+    const student = getDatabase().prepare('SELECT photo_path FROM students WHERE stid=? AND oid=?').get(studentId, org());
     if (!student) throw new Error('Student not found.');
-    return student.photo_data || null;
+    return readStudentImage(student.photo_path);
   });
   ipcMain.handle('students:choosePhoto', async () => {
     requireUser();
@@ -233,37 +282,43 @@ function registerIpc() {
     if (!values[0] || !values[2]) throw new Error('Student name and primary contact are required.');
     const hasPhoto = Object.hasOwn(input, 'photo_data');
     const photoData = input.photo_data ?? null;
-    if (photoData !== null) {
-      const photoMatch = typeof photoData === 'string'
-        ? photoData.match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/)
-        : null;
-      const image = photoMatch ? Buffer.from(photoMatch[2], 'base64') : null;
-      const actualMime = image && image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff
-        ? 'jpeg'
-        : image && image.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-          ? 'png'
-          : image && image.subarray(0, 4).toString('ascii') === 'RIFF' && image.subarray(8, 12).toString('ascii') === 'WEBP'
-            ? 'webp'
-            : null;
-      if (
-        !photoMatch ||
-        !image.length ||
-        image.length > 2 * 1024 * 1024 ||
-        image.toString('base64') !== photoMatch[2] ||
-        actualMime !== photoMatch[1]
-      ) {
-        throw new Error('Choose a valid JPEG, PNG or WebP student photo up to 2 MB.');
+    if (photoData !== null) decodeImageData(photoData);
+    const oid = org();
+    const imageDirectory = db.prepare('SELECT image_directory FROM organizations WHERE oid=?').get(oid).image_directory;
+    let createdPath = null;
+    let previousPath = null;
+    try {
+      const save = db.transaction(() => {
+        if (input.stid) {
+          const student = db.prepare('SELECT photo_path FROM students WHERE stid=? AND oid=?').get(input.stid, oid);
+          if (!student) throw new Error('Student not found.');
+          previousPath = student.photo_path;
+          const photoPath = hasPhoto && photoData !== null
+            ? (createdPath = writeStudentImage(imageDirectory, input.stid, photoData))
+            : hasPhoto ? null : student.photo_path;
+          db.prepare(`UPDATE students SET name=?,school=?,contact1=?,contact2=?,birthday=?,address=?,status=?,photo_path=?
+            WHERE stid=? AND oid=?`).run(...values, photoPath, input.stid, oid);
+          return input.stid;
+        }
+        const stid = db.prepare(`INSERT INTO students
+          (oid,name,school,contact1,contact2,birthday,address,status,photo_path) VALUES (?,?,?,?,?,?,?,?,NULL)`)
+          .run(oid, ...values).lastInsertRowid;
+        if (photoData !== null) {
+          createdPath = writeStudentImage(imageDirectory, stid, photoData);
+          db.prepare('UPDATE students SET photo_path=? WHERE stid=? AND oid=?').run(createdPath, stid, oid);
+        }
+        return stid;
+      });
+      const stid = save();
+      if (previousPath && previousPath !== createdPath &&
+          !db.prepare('SELECT 1 FROM students WHERE photo_path=? LIMIT 1').get(previousPath)) {
+        removeFiles([previousPath]);
       }
+      return stid;
+    } catch (error) {
+      if (createdPath) removeFiles([createdPath]);
+      throw error;
     }
-    if (input.stid) {
-      const result = db.prepare(`UPDATE students SET name=?,school=?,contact1=?,contact2=?,birthday=?,address=?,status=?
-        ${hasPhoto ? ',photo_data=?' : ''} WHERE stid=? AND oid=?`)
-        .run(...values, ...(hasPhoto ? [photoData] : []), input.stid, org());
-      if (!result.changes) throw new Error('Student not found.');
-      return input.stid;
-    }
-    return db.prepare(`INSERT INTO students (oid,name,school,contact1,contact2,birthday,address,status,photo_data)
-      VALUES (?,?,?,?,?,?,?,?,?)`).run(org(), ...values, photoData).lastInsertRowid;
   });
   ipcMain.handle('students:delete', (_event, stid) => {
     const result = getDatabase().prepare("UPDATE students SET status='inactive' WHERE stid=? AND oid=?").run(stid, org());
@@ -1186,7 +1241,7 @@ function registerIpc() {
   ipcMain.handle('settings:organization', () => {
     const oid = org();
     const db = getDatabase();
-    return db.prepare('SELECT name,contact,payment_due_day FROM organizations WHERE oid=?').get(oid);
+    return db.prepare('SELECT name,contact,payment_due_day,image_directory FROM organizations WHERE oid=?').get(oid);
   });
   ipcMain.handle('settings:saveOrganization', (_event, input) => {
     const name = String(input.name || '').trim();
@@ -1204,6 +1259,9 @@ function registerIpc() {
       .run(name, String(input.contact || ''), dueDay, oid).changes > 0;
     if (updated) activeUser.organization = name;
     return updated;
+  });
+  ipcMain.handle('settings:saveImageDirectory', (_event, directory) => {
+    return changeImageDirectory(getDatabase(), org(), directory);
   });
   ipcMain.handle('backup:create', async () => {
     const choice = await dialog.showSaveDialog(window, {
@@ -1247,7 +1305,8 @@ function registerIpc() {
       try {
         db.close();
         fs.copyFileSync(source, file);
-        openDatabase(file);
+        const restoredDb = openDatabase(file);
+        migrateLegacyStudentPhotos(restoredDb, path.join(app.getPath('userData'), 'student-images'));
         activeUser = getDatabase().prepare('SELECT u.user_id,u.oid,u.username,u.role,o.name AS organization FROM users u JOIN organizations o ON o.oid=u.oid WHERE u.user_id=?').get(restoringUserId);
         if (!activeUser) throw new Error('Restored backup no longer contains the signed-in account. Sign in again.');
         getDatabase().prepare('INSERT INTO backup_logs (oid,backup_type,file_path,status) VALUES (?,?,?,?)').run(org(), 'restore', source, 'success');
@@ -1258,7 +1317,8 @@ function registerIpc() {
           if (getDatabase()) getDatabase().close();
         } catch {}
         fs.copyFileSync(safetyCopy, file);
-        openDatabase(file);
+        const recoveredDb = openDatabase(file);
+        migrateLegacyStudentPhotos(recoveredDb, path.join(app.getPath('userData'), 'student-images'));
         activeUser = getDatabase().prepare('SELECT u.user_id,u.oid,u.username,u.role,o.name AS organization FROM users u JOIN organizations o ON o.oid=u.oid WHERE u.user_id=?').get(restoringUserId);
         throw new Error(`Restore failed; the previous database was recovered. ${error.message}`);
       }
@@ -1294,6 +1354,7 @@ function scheduleSessionAutoEnd(retryDelay) {
 
 app.whenReady().then(() => {
   const db = openDatabase(path.join(app.getPath('userData'), 'app.db'));
+  migrateLegacyStudentPhotos(db, path.join(app.getPath('userData'), 'student-images'));
   endExpiredSessions(db, localDate());
   registerIpc();
   scheduleSessionAutoEnd();
