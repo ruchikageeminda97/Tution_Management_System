@@ -1,8 +1,12 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { openDatabase, getDatabase, resetDatabase } = require('./database');
+const { createCloudBackup, prepareRestoreFile, validateDatabaseFile } = require('./services/backup-service');
+const { createBackupScheduler, localDate: backupLocalDate } = require('./services/backup-scheduler');
+const { GoogleDriveService } = require('./services/google-drive');
+const { SecureStore } = require('./services/secure-store');
 const { overlaps, slotIsAvailable, validateSlots, validTime } = require('./scheduling');
 const { overduePaymentMonths } = require('./payment-due');
 const { buildAttendanceReportHtml } = require('./attendance-report');
@@ -25,6 +29,9 @@ const {
 
 let window;
 let activeUser = null;
+let driveService;
+let backupScheduler;
+let backupOperationRunning = false;
 const dev = !app.isPackaged;
 const hashPassword = (password, salt = crypto.randomBytes(16).toString('hex')) => ({
   salt,
@@ -55,6 +62,152 @@ const requireUser = () => {
   return activeUser;
 };
 const org = () => requireUser().oid;
+
+function getBackupSettings(oid = org()) {
+  const database = getDatabase();
+  database.prepare('INSERT INTO backup_settings (oid) VALUES (?) ON CONFLICT(oid) DO NOTHING').run(oid);
+  return database.prepare('SELECT * FROM backup_settings WHERE oid=?').get(oid);
+}
+
+function backupErrorMessage(error) {
+  return String(error?.message || 'The backup operation failed.')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/ya29\.[\w.-]+/g, '[redacted]')
+    .replace(/1\/\/[\w.-]+/g, '[redacted]')
+    .slice(0, 300);
+}
+
+function organizationBackupKey(organizationName) {
+  return crypto.createHash('sha256').update(String(organizationName).trim().toLocaleLowerCase()).digest('hex').slice(0, 32);
+}
+
+function recordBackup(oid, type, filePath, status, error) {
+  getDatabase().prepare(`INSERT INTO backup_logs (oid,backup_type,file_path,status,error_message)
+    VALUES (?,?,?,?,?)`).run(oid, type, filePath || null, status, error ? backupErrorMessage(error) : null);
+}
+
+function checkScheduledBackupAfterLogin() {
+  if (backupScheduler) {
+    void backupScheduler.checkStartup().catch(error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error)));
+  }
+}
+
+async function runGoogleBackup(type, scheduledDate) {
+  if (backupOperationRunning) throw new Error('Another backup or restore operation is already in progress.');
+  const user = requireUser();
+  const settings = getBackupSettings(user.oid);
+  if (type === 'google-scheduled' && !settings.auto_enabled) {
+    throw new Error('Automatic Google Drive backups are disabled.');
+  }
+  if (type === 'google-scheduled' && settings.last_scheduled_date === scheduledDate) {
+    return { skipped: true };
+  }
+  const connected = driveService.status(user.oid).connected;
+  if (!connected) throw new Error('Connect a Google account before using Drive backups.');
+  const passphrase = driveService.getPassphrase(user.oid);
+  if (!passphrase) throw new Error('Set a recovery passphrase in Backup settings before backing up.');
+  backupOperationRunning = true;
+  let uploaded;
+  try {
+    const orgKey = organizationBackupKey(user.organization);
+    const drive = {
+      uploadBackup: (filePath, backupType) =>
+        driveService.uploadBackup(filePath, backupType, user.oid, orgKey, scheduledDate)
+    };
+    if (type === 'google-scheduled') {
+      uploaded = await driveService.findScheduledBackup(user.oid, orgKey, scheduledDate);
+    }
+    if (!uploaded) {
+      uploaded = await createCloudBackup({
+        database: getDatabase(),
+        drive,
+        organizationId: user.oid,
+        passphrase,
+        type
+      });
+    }
+    const retention = await driveService.retentionForSettings(user.oid, settings.retention, uploaded.id, orgKey)
+      .catch(error => ({ deleted: 0, errors: [backupErrorMessage(error)] }));
+    getDatabase().prepare(`UPDATE backup_settings
+      SET last_status='success',last_error=?,last_backup_at=?,last_scheduled_date=CASE WHEN ? IS NULL THEN last_scheduled_date ELSE ? END,retry_after=NULL
+      WHERE oid=?`).run(
+      retention.errors.length ? `Backup uploaded; retention cleanup: ${retention.errors.join('; ')}` : null,
+      new Date().toISOString(), scheduledDate || null, scheduledDate || null, user.oid
+    );
+    recordBackup(user.oid, type, uploaded.id, 'success',
+      retention.errors.length ? new Error(`Upload succeeded, but some old backups could not be removed: ${retention.errors.join('; ')}`) : null);
+    return { uploaded, retention };
+  } catch (error) {
+    const message = backupErrorMessage(error);
+    getDatabase().prepare(`UPDATE backup_settings SET last_status='failed',last_error=?,retry_after=? WHERE oid=?`)
+      .run(message, new Date(Date.now() + 15 * 60 * 1000).toISOString(), user.oid);
+    recordBackup(user.oid, type, uploaded?.id || null, 'failed', error);
+    throw error;
+  } finally {
+    backupOperationRunning = false;
+  }
+}
+
+async function restoreDatabaseFile(source, {
+  expectedOrganizationName,
+  organizationId,
+  retainSafetyCopy = false,
+  backupLogReference,
+  onRestoredOrganization = () => {}
+} = {}) {
+  validateDatabaseFile(source);
+  const Database = require('better-sqlite3');
+  let candidate;
+  try {
+    candidate = new Database(source, { readonly: true, fileMustExist: true });
+    const organization = expectedOrganizationName
+      ? candidate.prepare('SELECT oid,name FROM organizations WHERE name=? COLLATE NOCASE').get(expectedOrganizationName)
+      : candidate.prepare('SELECT oid,name FROM organizations WHERE oid=?').get(organizationId);
+    if (!organization) throw new Error('This backup does not contain the expected tuition centre.');
+    candidate.close();
+    candidate = null;
+    const database = getDatabase();
+    database.pragma('wal_checkpoint(TRUNCATE)');
+    const databaseFile = path.join(app.getPath('userData'), 'app.db');
+    if (path.resolve(source).toLowerCase() === path.resolve(databaseFile).toLowerCase()) {
+      throw new Error('Choose a separate backup file, not the database currently in use.');
+    }
+    const safetyCopy = `${databaseFile}.before-restore-${Date.now()}.db`;
+    fs.copyFileSync(databaseFile, safetyCopy);
+    const previousUser = activeUser;
+    try {
+      database.close();
+      fs.copyFileSync(source, databaseFile);
+      openDatabase(databaseFile);
+      migrateLegacyStudentPhotos(getDatabase(), path.join(app.getPath('userData'), 'student-images'));
+      if (retainSafetyCopy) {
+        const restoredOrganization = getDatabase().prepare('SELECT oid FROM organizations WHERE name=? COLLATE NOCASE')
+          .get(organization.name);
+        onRestoredOrganization(restoredOrganization.oid);
+        recordBackup(restoredOrganization.oid, 'google-restore', backupLogReference || source, 'success');
+        activeUser = null;
+      } else {
+        activeUser = getDatabase().prepare(`SELECT u.user_id,u.oid,u.username,u.role,o.name AS organization
+          FROM users u JOIN organizations o ON o.oid=u.oid WHERE u.user_id=?`).get(previousUser.user_id);
+        if (!activeUser) throw new Error('Restored backup no longer contains the signed-in account. Sign in again.');
+        recordBackup(activeUser.oid, 'restore', source, 'success');
+      }
+      if (!retainSafetyCopy) fs.rmSync(safetyCopy, { force: true });
+      return { restored: true, safetyCopy: retainSafetyCopy ? safetyCopy : undefined, requiresSignIn: retainSafetyCopy };
+    } catch (error) {
+      try {
+        if (getDatabase()) getDatabase().close();
+      } catch {}
+      fs.copyFileSync(safetyCopy, databaseFile);
+      openDatabase(databaseFile);
+      migrateLegacyStudentPhotos(getDatabase(), path.join(app.getPath('userData'), 'student-images'));
+      activeUser = previousUser;
+      throw new Error(`Restore failed; the previous database was recovered. ${error.message}`);
+    }
+  } finally {
+    if (candidate && candidate.open) candidate.close();
+  }
+}
 
 function findPaymentReceipt(receiptCode) {
   if (!/^\d{8}$/.test(receiptCode)) throw new Error('Enter an 8-digit payment receipt number.');
@@ -151,6 +304,7 @@ function registerIpc() {
     });
     const created = create();
     activeUser = { ...created, username, organization: name, role: 'admin' };
+    checkScheduledBackupAfterLogin();
     return { username, organization: name, role: 'admin' };
   });
   ipcMain.handle('auth:login', (_event, input) => {
@@ -160,10 +314,12 @@ function registerIpc() {
     ).get(username);
     if (!user || !verifyPassword(String(input.password || ''), user.password_hash)) throw new Error('Username or password is incorrect.');
     activeUser = user;
+    checkScheduledBackupAfterLogin();
     return { username: user.username, organization: user.organization, role: user.role };
   });
   ipcMain.handle('auth:recover', (_event, input) => {
     activeUser = recoverExistingAdmin(getDatabase(), input, hashPassword);
+    checkScheduledBackupAfterLogin();
     return {
       username: activeUser.username,
       organization: activeUser.organization,
@@ -185,6 +341,9 @@ function registerIpc() {
     if (result.response !== 1) return { reset: false };
     const photoPaths = getDatabase().prepare('SELECT photo_path FROM students WHERE photo_path IS NOT NULL').all()
       .map(student => student.photo_path);
+    for (const organization of getDatabase().prepare('SELECT oid FROM organizations').all()) {
+      driveService.forgetOrganization(organization.oid);
+    }
     resetDatabase(getDatabase());
     removeFiles(photoPaths);
     activeUser = null;
@@ -1263,6 +1422,137 @@ function registerIpc() {
   ipcMain.handle('settings:saveImageDirectory', (_event, directory) => {
     return changeImageDirectory(getDatabase(), org(), directory);
   });
+  ipcMain.handle('backup:getSettings', () => {
+    const user = requireUser();
+    const settings = getBackupSettings(user.oid);
+    const connected = driveService.status(user.oid);
+    const history = getDatabase().prepare(`SELECT backup_id,backup_type,file_path,status,error_message,created_at
+      FROM backup_logs WHERE oid=? ORDER BY backup_id DESC LIMIT 20`).all(user.oid);
+    const lastSuccessful = getDatabase().prepare(`SELECT created_at,backup_type FROM backup_logs
+      WHERE oid=? AND status='success' AND backup_type IN ('google-manual','google-scheduled')
+      ORDER BY backup_id DESC LIMIT 1`).get(user.oid) || null;
+    let nextScheduled = null;
+    if (settings.auto_enabled) {
+      const now = new Date();
+      const [hour, minute] = settings.backup_time.split(':').map(Number);
+      const candidate = new Date(now);
+      candidate.setHours(hour, minute, 0, 0);
+      if (candidate <= now || settings.last_scheduled_date === backupLocalDate(now)) {
+        candidate.setDate(candidate.getDate() + 1);
+      }
+      nextScheduled = candidate.toISOString();
+    }
+    return {
+      settings: {
+        googleClientId: settings.google_client_id,
+        googleClientSecretConfigured: Boolean(driveService.getClientSecret(user.oid)),
+        autoEnabled: Boolean(settings.auto_enabled),
+        backupTime: settings.backup_time,
+        retention: settings.retention,
+        missedRecovery: Boolean(settings.missed_recovery),
+        lastScheduledDate: settings.last_scheduled_date,
+        lastStatus: settings.last_status,
+        lastError: settings.last_error,
+        lastBackupAt: settings.last_backup_at,
+        nextScheduled
+      },
+      connected,
+      passphraseConfigured: Boolean(driveService.getPassphrase(user.oid)),
+      lastSuccessful,
+      history
+    };
+  });
+  ipcMain.handle('backup:saveSettings', (_event, input = {}) => {
+    const user = requireUser();
+    const clientId = String(input.googleClientId || '').trim();
+    const clientSecret = String(input.googleClientSecret || '').trim();
+    const backupTime = String(input.backupTime || '');
+    const retention = String(input.retention || '');
+    const autoEnabled = input.autoEnabled === true ? 1 : input.autoEnabled === false ? 0 : null;
+    const missedRecovery = input.missedRecovery === true ? 1 : input.missedRecovery === false ? 0 : null;
+    if (clientId.length > 255 || (clientId && !/^[\w-]+\.apps\.googleusercontent\.com$/.test(clientId))) {
+      throw new Error('Enter a valid Google OAuth Client ID ending in .apps.googleusercontent.com.');
+    }
+    if (clientSecret.length > 1024) throw new Error('Enter a valid Google OAuth Client Secret.');
+    if (clientSecret && !clientId) throw new Error('Enter the Google OAuth Client ID before saving its Client Secret.');
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(backupTime)) throw new Error('Choose a valid local backup time.');
+    if (!['7', '30', 'all'].includes(retention)) throw new Error('Choose a valid backup retention setting.');
+    if (autoEnabled === null || missedRecovery === null) throw new Error('Choose valid automatic and missed-backup settings.');
+    const passphrase = String(input.recoveryPassphrase || '');
+    if (passphrase && passphrase.length < 12) throw new Error('Use a recovery passphrase that is at least 12 characters long.');
+    const current = getBackupSettings(user.oid);
+    const currentClientSecret = driveService.getClientSecret(user.oid);
+    if (clientId && !clientSecret && (!currentClientSecret || clientId !== current.google_client_id)) {
+      throw new Error('Enter the Google OAuth Client Secret for this Client ID.');
+    }
+    if (passphrase) driveService.savePassphrase(user.oid, passphrase);
+    if (clientId && clientSecret) driveService.saveClientSecret(user.oid, clientSecret);
+    if (!clientId && currentClientSecret) driveService.secureStore.remove(driveService.clientSecretKey(user.oid));
+    if (clientId !== current.google_client_id || (clientSecret && clientSecret !== currentClientSecret)) {
+      driveService.clearConnection(user.oid);
+    }
+    getDatabase().prepare(`UPDATE backup_settings SET google_client_id=?,auto_enabled=?,backup_time=?,retention=?,
+      missed_recovery=? WHERE oid=?`).run(clientId, autoEnabled, backupTime, retention, missedRecovery, user.oid);
+    if (backupScheduler) void backupScheduler.checkStartup().catch(error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error)));
+    return true;
+  });
+  ipcMain.handle('backup:googleConnect', async () => {
+    const user = requireUser();
+    const result = await driveService.connect(user.oid);
+    if (backupScheduler) void backupScheduler.check().catch(error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error)));
+    return result;
+  });
+  ipcMain.handle('backup:googleDisconnect', () => driveService.disconnect(org()));
+  ipcMain.handle('backup:googleStatus', () => driveService.status(org()));
+  ipcMain.handle('backup:googleUpload', async () => {
+    const result = await runGoogleBackup('google-manual');
+    return { uploaded: result.uploaded };
+  });
+  ipcMain.handle('backup:googleList', async () => {
+    const user = requireUser();
+    return driveService.listBackups(user.oid, organizationBackupKey(user.organization));
+  });
+  ipcMain.handle('backup:googleRestore', async (_event, fileId) => {
+    const user = requireUser();
+    if (backupOperationRunning) throw new Error('Another backup or restore operation is already in progress.');
+    const confirmation = await dialog.showMessageBox(window, {
+      type: 'warning',
+      title: 'Restore Google Drive backup?',
+      message: 'Replace this computer’s Tuition Manager database?',
+      detail: 'The selected backup will replace the current database. A local safety copy will be retained. After restore, sign in using an account from the backup.',
+      buttons: ['Cancel', 'Restore database'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    });
+    if (confirmation.response !== 1) return { canceled: true };
+    if (backupOperationRunning) throw new Error('Another backup or restore operation is already in progress.');
+    backupOperationRunning = true;
+    try {
+      const passphrase = driveService.getPassphrase(user.oid);
+      if (!passphrase) throw new Error('Enter and save the recovery passphrase in Backup settings first.');
+      const orgKey = organizationBackupKey(user.organization);
+      const encrypted = await driveService.downloadBackup(user.oid, fileId, orgKey);
+      const directory = fs.mkdtempSync(path.join(app.getPath('temp'), 'tuition-restore-'));
+      try {
+        const restorePath = prepareRestoreFile(encrypted, passphrase, directory);
+        const restored = await restoreDatabaseFile(restorePath, {
+          expectedOrganizationName: user.organization,
+          retainSafetyCopy: true,
+          backupLogReference: fileId,
+          onRestoredOrganization: restoredOid => driveService.transferLocalSecrets(user.oid, restoredOid)
+        });
+        return restored;
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    } catch (error) {
+      recordBackup(user.oid, 'google-restore', fileId, 'failed', error);
+      throw error;
+    } finally {
+      backupOperationRunning = false;
+    }
+  });
   ipcMain.handle('backup:create', async () => {
     const choice = await dialog.showSaveDialog(window, {
       title: 'Save tuition database backup',
@@ -1270,60 +1560,33 @@ function registerIpc() {
       filters: [{ name: 'SQLite database', extensions: ['db'] }]
     });
     if (choice.canceled || !choice.filePath) return { canceled: true };
+    if (backupOperationRunning) throw new Error('Another backup or restore operation is already in progress.');
+    backupOperationRunning = true;
     const destination = choice.filePath.endsWith('.db') ? choice.filePath : `${choice.filePath}.db`;
     try {
       await getDatabase().backup(destination);
-      getDatabase().prepare('INSERT INTO backup_logs (oid,backup_type,file_path,status) VALUES (?,?,?,?)').run(org(), 'local', destination, 'success');
+      recordBackup(org(), 'local', destination, 'success');
       return { path: destination };
     } catch (error) {
-      getDatabase().prepare('INSERT INTO backup_logs (oid,backup_type,file_path,status) VALUES (?,?,?,?)').run(org(), 'local', destination, 'failed');
+      recordBackup(org(), 'local', destination, 'failed', error);
       throw error;
+    } finally {
+      backupOperationRunning = false;
     }
   });
   ipcMain.handle('backup:restore', async () => {
     const choice = await dialog.showOpenDialog(window, { title: 'Choose a tuition database backup', properties: ['openFile'], filters: [{ name: 'SQLite database', extensions: ['db','sqlite','sqlite3'] }] });
     if (choice.canceled || !choice.filePaths[0]) return { canceled: true };
     const source = choice.filePaths[0];
-    const Database = require('better-sqlite3');
-    let candidate;
+    if (backupOperationRunning) throw new Error('Another backup or restore operation is already in progress.');
+    backupOperationRunning = true;
     try {
-      candidate = new Database(source, { readonly: true, fileMustExist: true });
-      const required = ['organizations','users','students','teachers','halls','hall_availability','classes','class_schedules','class_enrollments','sessions','attendance','payments','teacher_payouts','teacher_payout_details','backup_logs'];
-      const tables = new Set(candidate.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
-      if (required.some(table => !tables.has(table))) throw new Error('This file is not a valid Tuition Manager database backup.');
-      if (candidate.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error('This backup database is damaged and cannot be restored.');
-      if (!candidate.prepare('SELECT 1 FROM organizations WHERE oid=?').get(org())) throw new Error('This backup does not contain your organization.');
-      candidate.close();
-      candidate = null;
-      const db = getDatabase();
-      db.pragma('wal_checkpoint(TRUNCATE)');
-      const file = path.join(app.getPath('userData'), 'app.db');
-      if (path.resolve(source).toLowerCase() === path.resolve(file).toLowerCase()) throw new Error('Choose a separate backup file, not the database currently in use.');
-      const safetyCopy = `${file}.before-restore-${Date.now()}`;
-      fs.copyFileSync(file, safetyCopy);
-      const restoringUserId = activeUser.user_id;
-      try {
-        db.close();
-        fs.copyFileSync(source, file);
-        const restoredDb = openDatabase(file);
-        migrateLegacyStudentPhotos(restoredDb, path.join(app.getPath('userData'), 'student-images'));
-        activeUser = getDatabase().prepare('SELECT u.user_id,u.oid,u.username,u.role,o.name AS organization FROM users u JOIN organizations o ON o.oid=u.oid WHERE u.user_id=?').get(restoringUserId);
-        if (!activeUser) throw new Error('Restored backup no longer contains the signed-in account. Sign in again.');
-        getDatabase().prepare('INSERT INTO backup_logs (oid,backup_type,file_path,status) VALUES (?,?,?,?)').run(org(), 'restore', source, 'success');
-        fs.rmSync(safetyCopy, { force: true });
-        return { restored: true };
-      } catch (error) {
-        try {
-          if (getDatabase()) getDatabase().close();
-        } catch {}
-        fs.copyFileSync(safetyCopy, file);
-        const recoveredDb = openDatabase(file);
-        migrateLegacyStudentPhotos(recoveredDb, path.join(app.getPath('userData'), 'student-images'));
-        activeUser = getDatabase().prepare('SELECT u.user_id,u.oid,u.username,u.role,o.name AS organization FROM users u JOIN organizations o ON o.oid=u.oid WHERE u.user_id=?').get(restoringUserId);
-        throw new Error(`Restore failed; the previous database was recovered. ${error.message}`);
-      }
+      return await restoreDatabaseFile(source, { organizationId: org() });
+    } catch (error) {
+      recordBackup(org(), 'restore', source, 'failed', error);
+      throw error;
     } finally {
-      if (candidate && candidate.open) candidate.close();
+      backupOperationRunning = false;
     }
   });
 }
@@ -1356,9 +1619,29 @@ app.whenReady().then(() => {
   const db = openDatabase(path.join(app.getPath('userData'), 'app.db'));
   migrateLegacyStudentPhotos(db, path.join(app.getPath('userData'), 'student-images'));
   endExpiredSessions(db, localDate());
+  const secureStore = new SecureStore(path.join(app.getPath('userData'), 'secure-backup'), safeStorage);
+  driveService = new GoogleDriveService({
+    getSettings: getBackupSettings,
+    secureStore,
+    shell,
+    getWindow: () => window,
+    onConnectionChanged: () => {
+      if (backupScheduler) void backupScheduler.check().catch(error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error)));
+    }
+  });
+  backupScheduler = createBackupScheduler({
+    getSettings: () => {
+      if (!activeUser) return null;
+      const settings = getBackupSettings(activeUser.oid);
+      return driveService.status(activeUser.oid).connected ? settings : null;
+    },
+    runScheduled: date => runGoogleBackup('google-scheduled', date),
+    onError: error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error))
+  });
   registerIpc();
   scheduleSessionAutoEnd();
   createWindow();
+  backupScheduler.start();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

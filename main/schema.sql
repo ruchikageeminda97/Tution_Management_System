@@ -149,7 +149,21 @@ CREATE TABLE IF NOT EXISTS backup_logs (
   backup_type TEXT NOT NULL,
   file_path TEXT,
   status TEXT NOT NULL,
+  error_message TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS backup_settings (
+  oid INTEGER PRIMARY KEY REFERENCES organizations(oid) ON DELETE CASCADE,
+  google_client_id TEXT NOT NULL DEFAULT '',
+  auto_enabled INTEGER NOT NULL DEFAULT 1 CHECK (auto_enabled IN (0,1)),
+  backup_time TEXT NOT NULL DEFAULT '15:00',
+  retention TEXT NOT NULL DEFAULT '30' CHECK (retention IN ('7','30','all')),
+  missed_recovery INTEGER NOT NULL DEFAULT 1 CHECK (missed_recovery IN (0,1)),
+  last_scheduled_date TEXT,
+  retry_after TEXT,
+  last_status TEXT,
+  last_error TEXT,
+  last_backup_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_students_oid_name ON students(oid, name);
 CREATE INDEX IF NOT EXISTS idx_classes_oid ON classes(oid);

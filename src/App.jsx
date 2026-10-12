@@ -3355,6 +3355,19 @@ function SettingsPage({ user, setUser, notify, refresh }) {
   const { data, error } = useLoad(() => api.settings.organization(), []);
   const [form, setForm] = useState(null);
   const [imageDirectory, setImageDirectory] = useState("");
+  const [driveData, setDriveData] = useState(null);
+  const [driveForm, setDriveForm] = useState({
+    googleClientId: "",
+    googleClientSecret: "",
+    autoEnabled: true,
+    backupTime: "15:00",
+    retention: "30",
+    missedRecovery: true,
+    recoveryPassphrase: "",
+    recoveryPassphraseConfirm: ""
+  });
+  const [driveBusy, setDriveBusy] = useState("");
+  const [driveBackups, setDriveBackups] = useState(null);
   useEffect(() => {
     if (data) {
       setForm(data);
@@ -3363,6 +3376,22 @@ function SettingsPage({ user, setUser, notify, refresh }) {
   }, [data]);
   const [busy, setBusy] = useState(false);
   const [imageDirectoryBusy, setImageDirectoryBusy] = useState(false);
+  const loadDriveSettings = useCallback(async () => {
+    const result = await api.backup.getSettings();
+    setDriveData(result);
+    setDriveForm((current) => ({
+      ...current,
+      googleClientId: result.settings.googleClientId || "",
+      googleClientSecret: "",
+      autoEnabled: result.settings.autoEnabled,
+      backupTime: result.settings.backupTime,
+      retention: result.settings.retention,
+      missedRecovery: result.settings.missedRecovery
+    }));
+  }, []);
+  useEffect(() => {
+    loadDriveSettings().catch((err) => notify(err.message, "error"));
+  }, [loadDriveSettings, notify]);
   const save = async (event) => {
     event.preventDefault();
     setBusy(true);
@@ -3394,6 +3423,91 @@ function SettingsPage({ user, setUser, notify, refresh }) {
       }
     } catch (err) {
       notify(err.message, "error");
+    }
+  };
+  const saveDriveSettings = async (event) => {
+    event.preventDefault();
+    if (driveForm.recoveryPassphrase !== driveForm.recoveryPassphraseConfirm) {
+      notify("The recovery passphrases do not match.", "error");
+      return;
+    }
+    setDriveBusy("save");
+    try {
+      await api.backup.saveSettings(driveForm);
+      setDriveForm((current) => ({
+        ...current,
+        googleClientSecret: "",
+        recoveryPassphrase: "",
+        recoveryPassphraseConfirm: ""
+      }));
+      await loadDriveSettings();
+      notify("Google Drive backup settings saved.");
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setDriveBusy("");
+    }
+  };
+  const connectDrive = async () => {
+    setDriveBusy("connect");
+    try {
+      const result = await api.backup.googleConnect();
+      await loadDriveSettings();
+      notify(`Google Drive connected${result.email ? ` as ${result.email}` : ""}.`);
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setDriveBusy("");
+    }
+  };
+  const disconnectDrive = async () => {
+    setDriveBusy("disconnect");
+    try {
+      await api.backup.googleDisconnect();
+      await loadDriveSettings();
+      setDriveBackups(null);
+      notify("Google Drive disconnected.");
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setDriveBusy("");
+    }
+  };
+  const cloudBackupNow = async () => {
+    setDriveBusy("upload");
+    try {
+      await api.backup.googleUpload();
+      setDriveBackups(null);
+      await loadDriveSettings();
+      notify("Encrypted database backup uploaded to Google Drive.");
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setDriveBusy("");
+    }
+  };
+  const loadDriveBackups = async () => {
+    setDriveBusy("list");
+    try {
+      setDriveBackups(await api.backup.googleList());
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setDriveBusy("");
+    }
+  };
+  const restoreDriveBackup = async (fileId) => {
+    setDriveBusy("restore");
+    try {
+      const result = await api.backup.googleRestore(fileId);
+      if (result.restored) {
+        notify(`Backup restored. Safety copy retained at ${result.safetyCopy}. Sign in with an account from the backup.`);
+        window.setTimeout(() => window.location.reload(), 3000);
+      }
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setDriveBusy("");
     }
   };
   const chooseImageDirectory = async () => {
@@ -3545,6 +3659,138 @@ function SettingsPage({ user, setUser, notify, refresh }) {
               Choose file
             </Button>
           </div>
+        </section>
+        <section className="panel settings-card drive-settings">
+          <div className="settings-card-heading">
+            <div className="settings-icon settings-icon-purple">
+              <ShieldCheck size={19} />
+            </div>
+            <div>
+              <h2>Google Drive automatic backup</h2>
+              <p>Encrypted database-only backups in your own Google Drive. Student images are not uploaded.</p>
+            </div>
+          </div>
+          <div className={`drive-connection ${driveData?.connected?.connected ? "is-connected" : ""}`}>
+            <div>
+              <b>{driveData?.connected?.connected ? "Connected to Google Drive" : "Google Drive is not connected"}</b>
+              <span>{driveData?.connected?.connected ? driveData.connected.email || "Google account connected" : "Connect the Google account that should own this tuition centre’s backups."}</span>
+            </div>
+            {driveData?.connected?.connected ? (
+              <Button kind="secondary" type="button" onClick={disconnectDrive} disabled={Boolean(driveBusy)}>
+                {driveBusy === "disconnect" ? "Disconnecting…" : "Disconnect"}
+              </Button>
+            ) : (
+              <Button type="button" onClick={connectDrive} disabled={Boolean(driveBusy) || !driveForm.googleClientId || driveForm.googleClientId !== driveData?.settings.googleClientId || Boolean(driveForm.googleClientSecret) || !driveData?.settings.googleClientSecretConfigured || !driveData?.passphraseConfigured}>
+                {driveBusy === "connect" ? "Connecting…" : "Connect Google Drive"}
+              </Button>
+            )}
+          </div>
+          <form onSubmit={saveDriveSettings} className="settings-form">
+            <div className="form-two">
+              <Field label="Google OAuth Client ID" required>
+                <input
+                  type="text"
+                  autoComplete="off"
+                  value={driveForm.googleClientId}
+                  placeholder="xxxx.apps.googleusercontent.com"
+                  onChange={(event) => setDriveForm({ ...driveForm, googleClientId: event.target.value })}
+                />
+                <small>Copy this from Google Cloud Console → Clients.</small>
+              </Field>
+              <Field label="Google OAuth Client Secret" required={!driveData?.settings.googleClientSecretConfigured}>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={driveForm.googleClientSecret}
+                  placeholder={driveData?.settings.googleClientSecretConfigured ? "Saved securely; leave blank to keep" : "Enter the client secret"}
+                  onChange={(event) => setDriveForm({ ...driveForm, googleClientSecret: event.target.value })}
+                />
+                <small>{driveData?.settings.googleClientSecretConfigured ? "Stored with operating-system protection and never displayed after saving." : "Copy the matching secret from Google Cloud Console → Clients."}</small>
+              </Field>
+            </div>
+            <div className="backup-preferences">
+              <label className="backup-toggle">
+                <input type="checkbox" checked={driveForm.autoEnabled} onChange={(event) => setDriveForm({ ...driveForm, autoEnabled: event.target.checked })} />
+                <span>Enable automatic daily backup</span>
+              </label>
+              <label className="backup-toggle">
+                <input type="checkbox" checked={driveForm.missedRecovery} onChange={(event) => setDriveForm({ ...driveForm, missedRecovery: event.target.checked })} />
+                <span>Run a missed backup when I next open the app</span>
+              </label>
+              <Field label="Backup time (this computer’s local time)">
+                <input type="time" value={driveForm.backupTime} onChange={(event) => setDriveForm({ ...driveForm, backupTime: event.target.value })} />
+              </Field>
+              <Field label="Keep successful backups">
+                <select value={driveForm.retention} onChange={(event) => setDriveForm({ ...driveForm, retention: event.target.value })}>
+                  <option value="7">Last 7 backups</option>
+                  <option value="30">Last 30 backups</option>
+                  <option value="all">Keep all backups</option>
+                </select>
+              </Field>
+            </div>
+            <div className="backup-recovery-key">
+              <b>{driveData?.passphraseConfigured ? "Recovery passphrase is set on this computer" : "Set a recovery passphrase"}</b>
+              <span>Choose at least 12 characters. It encrypts every Drive backup and is protected locally by the operating system. Keep it somewhere safe: you will need the same passphrase to restore on another computer. Changing it does not re-encrypt older backups.</span>
+              <div className="form-two">
+                <Field label={driveData?.passphraseConfigured ? "New recovery passphrase (optional)" : "Recovery passphrase"} required={!driveData?.passphraseConfigured}>
+                  <input type="password" autoComplete="new-password" value={driveForm.recoveryPassphrase} onChange={(event) => setDriveForm({ ...driveForm, recoveryPassphrase: event.target.value })} />
+                </Field>
+                <Field label="Confirm recovery passphrase" required={Boolean(driveForm.recoveryPassphrase)}>
+                  <input type="password" autoComplete="new-password" value={driveForm.recoveryPassphraseConfirm} onChange={(event) => setDriveForm({ ...driveForm, recoveryPassphraseConfirm: event.target.value })} />
+                </Field>
+              </div>
+            </div>
+            <div className="backup-status-grid">
+              <div><span>Last successful Drive backup</span><b>{driveData?.lastSuccessful ? new Date(`${driveData.lastSuccessful.created_at.replace(" ", "T")}Z`).toLocaleString() : "Not yet backed up"}</b></div>
+              <div><span>Next scheduled backup</span><b>{driveData?.settings.nextScheduled ? new Date(driveData.settings.nextScheduled).toLocaleString() : "Automatic backup is off"}</b></div>
+              <div><span>Latest backup status</span><b>{driveData?.settings.lastStatus || "No scheduled result yet"}{driveData?.settings.lastError ? ` — ${driveData.settings.lastError}` : ""}</b></div>
+            </div>
+            <div className="settings-actions">
+              <Button type="submit" disabled={Boolean(driveBusy)}>{driveBusy === "save" ? "Saving…" : "Save Drive settings"}</Button>
+            </div>
+          </form>
+          <div className="backup-info drive-actions">
+            <div>
+              <Download size={17} />
+              <div><b>Manual encrypted backup</b><span>Uploads a new backup immediately; it does not count as today’s scheduled backup.</span></div>
+            </div>
+            <Button kind="secondary" type="button" onClick={cloudBackupNow} disabled={!driveData?.connected?.connected || !driveData?.passphraseConfigured || Boolean(driveBusy)}>
+              {driveBusy === "upload" ? "Encrypting and uploading…" : "Backup Now"}
+            </Button>
+          </div>
+          <div className="backup-info drive-actions">
+            <div>
+              <ArrowDownToLine size={17} />
+              <div><b>Restore from Google Drive</b><span>Choose an encrypted backup. A local safety copy is retained before replacing the database.</span></div>
+            </div>
+            <Button kind="secondary" type="button" onClick={loadDriveBackups} disabled={!driveData?.connected?.connected || Boolean(driveBusy)}>
+              {driveBusy === "list" ? "Loading…" : "List backups"}
+            </Button>
+          </div>
+          {driveBackups && (
+            <div className="drive-backup-list">
+              {driveBackups.length === 0 ? <p>No Tuition Manager backups were found for this centre.</p> : driveBackups.map((backupItem) => (
+                <div className="drive-backup-row" key={backupItem.id}>
+                  <div><b>{backupItem.name}</b><span>{new Date(backupItem.createdTime).toLocaleString()} · {(backupItem.size / (1024 * 1024)).toFixed(2)} MB · Uploaded</span></div>
+                  <Button kind="secondary" type="button" onClick={() => restoreDriveBackup(backupItem.id)} disabled={Boolean(driveBusy)}>
+                    {driveBusy === "restore" ? "Restoring…" : "Restore"}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+          {driveData?.history?.length > 0 && (
+            <div className="backup-history">
+              <b>Recent backup history</b>
+              {driveData.history.map((item) => (
+                <div key={item.backup_id}>
+                  <span>{item.backup_type.replace("google-", "Google ")} · {new Date(`${item.created_at.replace(" ", "T")}Z`).toLocaleString()}</span>
+                  <strong className={item.status === "success" ? "backup-history-success" : "backup-history-failed"}>{item.status}</strong>
+                  {item.error_message && <small>{item.error_message}</small>}
+                </div>
+              ))}
+            </div>
+          )}
         </section>
         <section className="panel settings-card account-settings">
           <div className="settings-card-heading">

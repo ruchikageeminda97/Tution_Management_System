@@ -11,6 +11,7 @@ function openDatabase(filePath) {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
+  migrateBackupSettings(db);
   const organizationColumns = new Set(db.pragma('table_info(organizations)').map(column => column.name));
   if (!organizationColumns.has('payment_due_day')) {
     db.exec('ALTER TABLE organizations ADD COLUMN payment_due_day INTEGER CHECK (payment_due_day BETWEEN 1 AND 31)');
@@ -81,6 +82,23 @@ function openDatabase(filePath) {
   return db;
 }
 
+function migrateBackupSettings(database) {
+  const version = database.pragma('user_version', { simple: true });
+  if (version >= 2) return;
+  const migrate = database.transaction(() => {
+    const backupColumns = new Set(database.pragma('table_info(backup_logs)').map(column => column.name));
+    if (!backupColumns.has('error_message')) {
+      database.exec('ALTER TABLE backup_logs ADD COLUMN error_message TEXT');
+    }
+    const settingsColumns = new Set(database.pragma('table_info(backup_settings)').map(column => column.name));
+    if (!settingsColumns.has('retry_after')) {
+      database.exec('ALTER TABLE backup_settings ADD COLUMN retry_after TEXT');
+    }
+    database.pragma('user_version = 2');
+  });
+  migrate();
+}
+
 function getDatabase() {
   if (!db) throw new Error('Database is not available.');
   return db;
@@ -107,4 +125,4 @@ function resetDatabase(database = getDatabase()) {
   }
 }
 
-module.exports = { openDatabase, getDatabase, resetDatabase };
+module.exports = { openDatabase, getDatabase, resetDatabase, migrateBackupSettings };

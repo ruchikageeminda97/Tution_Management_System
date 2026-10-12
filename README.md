@@ -28,14 +28,16 @@ Student and teacher pages include downloadable Excel templates and `.xlsx` impor
 - Attendance registers with automatic RFID scanning and student details, separate register-open/class-start/end steps with recorded timestamps, student arrival punches and late-minute tracking, automatic absent marking when a session ends, attendance PDF exports with class/teacher and attendance timing details, and a non-blocking yellow warning for unpaid monthly fees after the organization's recurring payment due day.
 - Monthly tuition collection from the payments screen or attendance register, with duplicate-payment protection.
 - Class earnings, outstanding fees, teacher commissions, organization shares and teacher-payout records, plus selectable-date daily summary PDFs covering receipts by class, teacher payouts, active students and session attendance. Printable A4 landscape annual payment-register PDFs have a separate ruled January–December sheet for each class.
-- Editable organization details, a recurring student payment due day (1–31), configurable local photo storage, and local SQLite backup/validated restore. Restore first makes a safety copy of the active database.
+- Editable organization details, a recurring student payment due day (1–31), configurable local photo storage, local SQLite backup/validated restore, and encrypted Google Drive backup/restore. Restore makes a safety copy of the active database.
 
 ## Data and backup notes
 
-Each signed-in account is scoped to its organization. The database currently supports one initial administrator account per fresh installation; additional staff-account management is not yet exposed in the interface. Google Drive backup is also not configured: it requires a Google OAuth desktop client and secure token-storage setup, so the current backup workflow is local-file only.
+Each signed-in account is scoped to its organization. The database currently supports one initial administrator account per fresh installation; additional staff-account management is not yet exposed in the interface. Google Drive backup must be configured in **Settings** with the matching Google Desktop OAuth Client ID and Client secret plus a recovery passphrase. OAuth tokens, the client secret, and the locally cached passphrase are protected with the operating system's secure storage; the recovery passphrase is required to decrypt backups on another computer. See [`new.md`](new.md) for the required Google Console setup and step-by-step testing.
 
 Choose a student-photo folder during first-time setup or later in Settings. Changing the folder moves existing photos there. Database backups contain student records and photo paths, but do not include the image files; keep the image folder when moving or restoring a workspace if photos must remain available.
 
-Amounts are displayed using the computer’s locale number formatting; the app does not yet store a currency code. Choose a consistent currency for records managed in this workspace. SQLite database files and local backups are not encrypted; keep backup files somewhere you trust.
+Google Drive uploads contain only an encrypted SQLite snapshot; student photos are stored outside the database and are not uploaded. Local database files and local backups are not encrypted, so keep them somewhere trusted. Google Drive backups use AES-256-GCM and cannot be recovered without the recovery passphrase.
+
+Amounts are displayed using the computer’s locale number formatting; the app does not yet store a currency code. Choose a consistent currency for records managed in this workspace.
 
 When enrolling students, the app shows each student’s tuition after their discount and the resulting teacher and organization shares. For example, a 50% discount on a 1,000 fee results in 500 due; at 80% teacher commission, the teacher receives 400 and the organization receives 100. A zero discount means the full 1,000 fee.

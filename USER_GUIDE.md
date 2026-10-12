@@ -227,6 +227,16 @@ At the top of Reports, choose a date in the daily-summary section and select its
 4. The app refreshes after a successful restore. Make sure you selected the intended backup because restoring replaces the current workspace data with the backup's data.
 5. Backups include database records and photo paths, not the actual image files. Keep the student photo folder when moving the app or restoring a backup if you need the photos.
 
+### Configure Google Drive backup
+
+1. Complete the Google Cloud Console setup in [`new.md`](new.md), then open **Settings → Google Drive automatic backup**.
+2. Enter the matching Desktop OAuth Client ID and Client secret from Google Cloud → Clients, choose and confirm a recovery passphrase of at least 12 characters, set the automatic backup time/retention options, and save. The Client secret is masked and protected by operating-system storage.
+3. Select **Connect Google Drive** and approve access in the system browser. The app can only manage its own Tuition Manager backup files.
+4. Use **Backup Now** for an immediate encrypted backup, or leave automatic backup enabled for the configured local time. Scheduled backups run only while the app is running and signed in; the default missed-run option catches up when you next open the app and sign in.
+5. Use **List backups** and **Restore** to restore a Drive backup. Confirm the replacement prompt. The app retains a local safety copy and returns to sign-in after restoring.
+6. On another computer, configure the same Desktop OAuth Client ID and Client secret, connect the same Google account, enter the same tuition-centre name, set the original recovery passphrase, and select the intended Drive backup. Sign in with credentials contained in that backup after restoration.
+7. Keep the recovery passphrase separately and safely. Changing it affects new backups only; older backups still require the passphrase that encrypted them. Neither Drive nor local database backups include the actual student image files.
+
 ## 12. Helpful operating notes
 
 - Keep class schedules, teacher assignments and enrolments current before generating attendance sessions.
@@ -238,4 +248,4 @@ At the top of Reports, choose a date in the daily-summary section and select its
 - Back up regularly, especially before restoring a database or moving the app to another computer.
 - Amounts use the computer's locale number formatting. The app does not currently store a separate currency code; use one consistent currency for records in a workspace.
 - The database and local backup files are not encrypted. Protect the computer and any folders containing backups.
-- Current account-management features do not expose staff-account creation in the interface. Google Drive backup is not configured; use the local backup/restore controls.
+- Current account-management features do not expose staff-account creation in the interface. Google Drive automatic backups do not run while the app is closed; keep local backups as an additional recovery option.

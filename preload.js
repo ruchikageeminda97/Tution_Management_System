@@ -60,5 +60,16 @@ contextBridge.exposeInMainWorld('tuition', Object.freeze({
     saveOrganization: invoke('settings:saveOrganization'),
     saveImageDirectory: invoke('settings:saveImageDirectory')
   },
-  backup: { create: invoke('backup:create'), restore: invoke('backup:restore') }
+  backup: {
+    create: invoke('backup:create'),
+    restore: invoke('backup:restore'),
+    getSettings: invoke('backup:getSettings'),
+    saveSettings: invoke('backup:saveSettings'),
+    googleConnect: invoke('backup:googleConnect'),
+    googleDisconnect: invoke('backup:googleDisconnect'),
+    googleStatus: invoke('backup:googleStatus'),
+    googleUpload: invoke('backup:googleUpload'),
+    googleList: invoke('backup:googleList'),
+    googleRestore: invoke('backup:googleRestore')
+  }
 }));

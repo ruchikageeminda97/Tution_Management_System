@@ -41,6 +41,11 @@ listed below as the current source of truth.
 | `main/main.js` | Creates the Electron window, authentication/session state, IPC handlers, validation, application workflows, and backup/restore operations. |
 | `main/database.js` | Opens and returns the singleton `better-sqlite3` database connection. |
 | `main/schema.sql` | Fresh-database schema, constraints, foreign keys, and indexes. |
+| `main/services/backup-service.js` | Creates `better-sqlite3` snapshots, validates database files, encrypts before Drive upload, and prepares validated cloud restore files. |
+| `main/services/google-drive.js` | Google OAuth PKCE with a Desktop client secret, OS-encrypted credential persistence, application-owned Drive folder/files, retries, listing, and retention. |
+| `main/services/backup-crypto.js` | AES-256-GCM encryption/decryption using a recovery-passphrase-derived key. |
+| `main/services/backup-scheduler.js` | Local-time daily scheduler with persisted success-date/retry state and missed-run handling. |
+| `main/services/secure-store.js` | Stores OAuth tokens, the Desktop client secret, and the locally cached recovery passphrase only through Electron `safeStorage`. |
 | `main/scheduling.js` | Shared weekly schedule validation and overlap/availability helpers. |
 | `main/record-import.js` | Excel workbook parsing and student/teacher template generation. |
 | `index.html` | Renderer HTML shell and Content Security Policy. |
@@ -70,7 +75,8 @@ and class patterns when adding UI.
    enables SQLite WAL mode and foreign keys, and executes `main/schema.sql`.
 4. `schema.sql` uses `CREATE TABLE/INDEX IF NOT EXISTS`. This creates missing
    objects on a fresh install, but it does **not** alter an existing table when
-   its definition changes. There is currently no versioned migration runner.
+   its definition changes. `main/database.js` therefore applies the numbered
+   `PRAGMA user_version` migrations for existing databases (currently version 2).
 5. On sign-in/setup, `activeUser` is held in the main process. Each data handler
    resolves the active organization through `org()` / `requireUser()` rather
    than accepting an organization ID from the renderer.
@@ -116,7 +122,8 @@ columns use SQLite `REAL`; application calculations round where needed.
 | `payments` | `payment_id` PK, `enrollment_id` FK, covered month, amount, payment date/time, optional session and user references, notes, `created_at`. Unique `(enrollment_id, for_month)` prevents duplicate monthly fees. |
 | `teacher_payouts` | `payout_id` PK, teacher `tid` FK, amount, payout date, notes, `created_at`. |
 | `teacher_payout_details` | `detail_id` PK, `payout_id` FK, `class_id` FK, class amount, optional covered month. |
-| `backup_logs` | `backup_id` PK, optional `oid` FK, backup type, file path, status, `created_at`. |
+| `backup_logs` | `backup_id` PK, optional `oid` FK, backup type, file path (local path or Drive file ID), status, optional error message, `created_at`. |
+| `backup_settings` | Per-organization non-secret Google OAuth client ID, automatic schedule/retention preferences, last scheduled-success date, status and retry metadata. OAuth and recovery secrets are stored separately with OS-protected storage. |
 
 ### Relationships
 
@@ -197,12 +204,11 @@ input.
 | Payments | `payments:overview`; `reports:paymentRecords` accepts student/class and month/range filters; `payouts:list` accepts teacher and month/range filters | `payments:pay` and `students:payFees` create monthly student payment records; `payouts:add` records teacher payouts | No payment edit/delete handler currently; duplicate covered months are rejected by a database unique constraint. |
 | Teacher payouts | `payouts:list` | `payouts:add` creates payout and optional detail rows in one transaction | No payout edit/delete handler currently. |
 | Organization/settings | `settings:organization` | `settings:saveOrganization` | Not deletable in the UI. |
-| Backups | Dashboard's last successful backup | `backup:create` | `backup:restore` validates and restores a selected SQLite file with a safety copy. |
+| Backups | Dashboard's last successful backup | `backup:create`, `backup:googleUpload` | Local restore validates a SQLite file and makes a safety copy; Drive restore downloads, authenticates/decrypts and validates before replacement. |
 
 Setup creates the initial organization and admin user. Although the schema has a
 `staff` role, account management for adding staff is not currently exposed.
-Google Drive backup is not implemented/configured; current backup is local-file
-only.
+Google Drive configuration and account connection are managed in Settings.
 
 ## 6. IPC API inventory
 
@@ -222,7 +228,7 @@ corresponding handlers are registered in `main/main.js`.
 | `reports` | `classEarnings`, `teacherBalances`, `paymentRecords`, `studentAttendance`, `pendingPayments`, `exportPDF` |
 | `payouts` | `list`, `add` |
 | `settings` | `organization`, `saveOrganization` |
-| `backup` | `create`, `restore` |
+| `backup` | `create`, `restore`, `getSettings`, `saveSettings`, `googleConnect`, `googleDisconnect`, `googleStatus`, `googleUpload`, `googleList`, `googleRestore` |
 
 The `records:import` and `records:downloadTemplate` channels are also used
 internally by student/teacher bridge methods; `preload.js` fixes the requested
@@ -356,7 +362,9 @@ features require Electron and its preload bridge.
   stored. Amount columns use SQLite `REAL`.
 - Database and local backup files are not encrypted. Protect them using trusted
   operating-system accounts and secure backup locations.
-- Backups are local only; cloud backup integration is not configured.
+- Google Drive backups use `better-sqlite3` snapshots, AES-256-GCM encryption,
+  OAuth PKCE and `drive.file`. The scheduler runs only while Electron is open;
+  persisted settings prevent duplicate successful scheduled backups.
 - Payments and payouts are append-only through the current UI/API. Do not
   advertise editing or deletion unless a safe audited workflow is implemented.
 - The Payments page separates student fees from teacher payouts. Student
