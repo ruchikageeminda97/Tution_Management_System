@@ -54,7 +54,13 @@ contextBridge.exposeInMainWorld('tuition', Object.freeze({
     exportPDF: invoke('reports:exportPDF'),
     exportDailySummaryPDF: invoke('reports:exportDailySummaryPDF')
   },
-  payouts: { list: invoke('payouts:list'), add: invoke('payouts:add') },
+  payouts: {
+    list: invoke('payouts:list'),
+    add: invoke('payouts:add'),
+    setOpeningBalance: invoke('payouts:setOpeningBalance'),
+    importOpeningBalances: invoke('payouts:importOpeningBalances'),
+    downloadOpeningBalanceTemplate: invoke('payouts:downloadOpeningBalanceTemplate')
+  },
   settings: {
     organization: invoke('settings:organization'),
     saveOrganization: invoke('settings:saveOrganization'),
@@ -63,6 +69,8 @@ contextBridge.exposeInMainWorld('tuition', Object.freeze({
   backup: {
     create: invoke('backup:create'),
     restore: invoke('backup:restore'),
+    chooseDirectory: invoke('backup:chooseDirectory'),
+    saveDirectory: invoke('backup:saveDirectory'),
     getSettings: invoke('backup:getSettings'),
     saveSettings: invoke('backup:saveSettings'),
     googleConnect: invoke('backup:googleConnect'),

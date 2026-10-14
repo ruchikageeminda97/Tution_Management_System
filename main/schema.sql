@@ -143,6 +143,12 @@ CREATE TABLE IF NOT EXISTS teacher_payout_details (
   amount_for_class REAL NOT NULL CHECK (amount_for_class >= 0),
   for_month TEXT
 );
+CREATE TABLE IF NOT EXISTS teacher_opening_balances (
+  tid INTEGER PRIMARY KEY REFERENCES teachers(tid) ON DELETE CASCADE,
+  opening_amount REAL NOT NULL DEFAULT 0 CHECK (opening_amount >= 0),
+  notes TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS backup_logs (
   backup_id INTEGER PRIMARY KEY AUTOINCREMENT,
   oid INTEGER REFERENCES organizations(oid),
@@ -157,9 +163,12 @@ CREATE TABLE IF NOT EXISTS backup_settings (
   google_client_id TEXT NOT NULL DEFAULT '',
   auto_enabled INTEGER NOT NULL DEFAULT 1 CHECK (auto_enabled IN (0,1)),
   backup_time TEXT NOT NULL DEFAULT '15:00',
+  weekly_schedule TEXT NOT NULL DEFAULT '{"0":["15:00"],"1":["15:00"],"2":["15:00"],"3":["15:00"],"4":["15:00"],"5":["15:00"],"6":["15:00"]}',
+  local_backup_directory TEXT,
   retention TEXT NOT NULL DEFAULT '30' CHECK (retention IN ('7','30','all')),
   missed_recovery INTEGER NOT NULL DEFAULT 1 CHECK (missed_recovery IN (0,1)),
   last_scheduled_date TEXT,
+  last_scheduled_slot TEXT,
   retry_after TEXT,
   last_status TEXT,
   last_error TEXT,

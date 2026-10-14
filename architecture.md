@@ -47,7 +47,7 @@ listed below as the current source of truth.
 | `main/services/backup-scheduler.js` | Local-time daily scheduler with persisted success-date/retry state and missed-run handling. |
 | `main/services/secure-store.js` | Stores OAuth tokens, the Desktop client secret, and the locally cached recovery passphrase only through Electron `safeStorage`. |
 | `main/scheduling.js` | Shared weekly schedule validation and overlap/availability helpers. |
-| `main/record-import.js` | Excel workbook parsing and student/teacher template generation. |
+| `main/record-import.js` | Excel workbook parsing and student, teacher, and teacher-opening-balance templates. |
 | `index.html` | Renderer HTML shell and Content Security Policy. |
 | `vite.config.js` | Vite/React development and build configuration. |
 | `tests/database.test.js` | SQLite schema, relationship, attendance, fee, and earnings behavior tests. |
@@ -122,6 +122,7 @@ columns use SQLite `REAL`; application calculations round where needed.
 | `payments` | `payment_id` PK, `enrollment_id` FK, covered month, amount, payment date/time, optional session and user references, notes, `created_at`. Unique `(enrollment_id, for_month)` prevents duplicate monthly fees. |
 | `teacher_payouts` | `payout_id` PK, teacher `tid` FK, amount, payout date, notes, `created_at`. |
 | `teacher_payout_details` | `detail_id` PK, `payout_id` FK, `class_id` FK, class amount, optional covered month. |
+| `teacher_opening_balances` | Per-teacher opening payable amount and notes; contributes to teacher outstanding balances separately from student payment records. |
 | `backup_logs` | `backup_id` PK, optional `oid` FK, backup type, file path (local path or Drive file ID), status, optional error message, `created_at`. |
 | `backup_settings` | Per-organization non-secret Google OAuth client ID, automatic schedule/retention preferences, last scheduled-success date, status and retry metadata. OAuth and recovery secrets are stored separately with OS-protected storage. |
 
@@ -145,6 +146,7 @@ class_enrollments 1 ── * payments (one per covered month by unique constrain
 sessions 0..1 ── * payments
 teachers 1 ── * teacher_payouts
 teacher_payouts 1 ── * teacher_payout_details * ── 1 classes
+teachers 1 ── 0..1 teacher_opening_balances
 ```
 
 ### Data rules to preserve
@@ -362,9 +364,10 @@ features require Electron and its preload bridge.
   stored. Amount columns use SQLite `REAL`.
 - Database and local backup files are not encrypted. Protect them using trusted
   operating-system accounts and secure backup locations.
-- Google Drive backups use `better-sqlite3` snapshots, AES-256-GCM encryption,
-  OAuth PKCE and `drive.file`. The scheduler runs only while Electron is open;
-  persisted settings prevent duplicate successful scheduled backups.
+- Backups use `better-sqlite3` snapshots. Google Drive copies use AES-256-GCM,
+  OAuth PKCE and `drive.file`; local scheduled copies use a configurable folder.
+  The weekly scheduler supports multiple daily slots, runs while Electron is
+  open, and coalesces multiple missed slots into one catch-up backup.
 - Payments and payouts are append-only through the current UI/API. Do not
   advertise editing or deletion unless a safe audited workflow is implemented.
 - The Payments page separates student fees from teacher payouts. Student

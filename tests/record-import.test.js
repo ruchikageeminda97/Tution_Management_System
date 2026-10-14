@@ -54,3 +54,38 @@ test('Excel template downloads as a valid workbook with the documented headers',
     'Name', 'School', 'Primary Contact', 'Other Contact', 'Birthday', 'Address', 'Status'
   ]);
 });
+
+test('teacher opening balance templates and imports validate names and non-negative currency amounts', async () => {
+  const templateBuffer = await createTemplateBuffer('teacher-opening-balances');
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateBuffer);
+  assert.deepEqual(workbook.worksheets[0].getRow(1).values.slice(1), [
+    'Teacher Name',
+    'Opening Balance',
+    'Notes'
+  ]);
+
+  const validWorkbook = new ExcelJS.Workbook();
+  const validSheet = validWorkbook.addWorksheet('Opening Balances');
+  validSheet.addRow(['Teacher Name', 'Opening Balance', 'Notes']);
+  validSheet.addRow(['Alex Teacher', 1250.5, 'Previous term']);
+  assert.deepEqual(await parseExcelRecords(
+    await validWorkbook.xlsx.writeBuffer(),
+    'teacher-opening-balances'
+  ), [{
+    name: 'Alex Teacher',
+    opening_balance: 1250.5,
+    notes: 'Previous term'
+  }]);
+
+  for (const amount of ['', -1, 20.123, 'not a number']) {
+    const invalidWorkbook = new ExcelJS.Workbook();
+    const sheet = invalidWorkbook.addWorksheet('Opening Balances');
+    sheet.addRow(['Teacher Name', 'Opening Balance']);
+    sheet.addRow(['Alex Teacher', amount]);
+    await assert.rejects(
+      parseExcelRecords(await invalidWorkbook.xlsx.writeBuffer(), 'teacher-opening-balances'),
+      /opening balance/
+    );
+  }
+});

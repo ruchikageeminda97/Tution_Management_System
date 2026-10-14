@@ -213,8 +213,11 @@ input[type=checkbox]{width:14px;height:14px;accent-color:#7158d8;vertical-align:
 .report-table{margin-bottom:14px}
 .payout-panel{margin-top:14px}
 .payout-empty{padding:18px 15px;color:#969ba6;font-size:13px}
-.settings-grid{max-width:880px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.settings-grid{max-width:880px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:minmax(170px,1fr) minmax(340px,2fr) auto auto;grid-template-areas:"organization photo" "organization backup" "drive drive" "account account";gap:14px;align-items:stretch}
 .settings-card{padding:17px}
+.organization-settings-card{grid-area:organization}
+.photo-storage-card{grid-area:photo}
+.backup-restore-card{grid-area:backup}
 .settings-card-heading{display:flex;align-items:center;gap:10px}
 .settings-icon{width:34px;height:34px;display:grid;place-items:center;border-radius:9px;background:#f0edff;color:#7158d4}
 .settings-icon-green{background:#eaf5ed;color:#47956c}.settings-icon-purple{background:#eef0ff;color:#6376ca}
@@ -230,7 +233,7 @@ input[type=checkbox]{width:14px;height:14px;accent-color:#7158d8;vertical-align:
 .backup-info>div>div{display:flex;flex-direction:column;gap:4px}
 .backup-info b{font-size:13px;color:#434858}
 .backup-info span{font-size:12px;color:#999eaa;line-height:1.5;max-width:220px}
-.account-settings{grid-column:span 2}
+.account-settings{grid-area:account}
 .account-details{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;border-top:1px solid #f0f1f3;margin-top:16px;padding-top:14px}
 .account-detail{display:flex;flex-direction:column;gap:5px}
 .account-detail span{font-size:12px;color:#9a9eaa}
@@ -535,6 +538,18 @@ input[type=checkbox]{width:14px;height:14px;accent-color:#7158d8;vertical-align:
 .nav-item{height:46px;color:#596273;font-size:16px}
 .nav-label,.eyebrow{color:#686f7d}
 .org-copy span,.profile-text span,.muted,.sub-cell,.record-count{color:#626b7a}
+.student-profile-photo{width:100px;flex:none;display:flex;flex-direction:column;align-items:center;gap:4px;padding:0;border:0;background:transparent;color:#6553ba}
+.student-profile-photo .avatar{width:84px;height:84px;border-radius:16px;font-size:19px}
+.student-profile-photo .avatar.avatar-photo{object-fit:cover}
+.student-profile-photo.is-clickable{cursor:zoom-in}
+.student-profile-photo.is-clickable:hover .avatar{box-shadow:0 0 0 3px #7357dc30}
+.student-profile-photo:disabled{cursor:default}
+.student-profile-photo>span{font-size:11px;font-weight:650}
+.student-photo-lightbox{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;padding:48px 24px 24px;background:#11131be8;animation:fade-in .14s ease-out}
+.student-photo-lightbox>img{display:block;width:auto;height:auto;max-width:min(90vw,900px);max-height:80vh;object-fit:contain;border:1px solid #ffffff24;border-radius:12px;box-shadow:0 18px 70px #0008}
+.student-photo-lightbox>span{color:#fff;font-size:14px;font-weight:700}
+.student-photo-lightbox-close{position:absolute;top:18px;right:20px;width:42px;height:42px;border:1px solid #ffffff40;background:#ffffff17;color:#fff}
+.student-photo-lightbox-close:hover{background:#ffffff30}
 
 .button-alert{color:#fff;background:#c83f49;border-color:#b8333e;box-shadow:0 2px 5px #c83f4926}
 .button-alert:hover{background:#ad2f39}
@@ -902,7 +917,8 @@ input[type=checkbox]{width:14px;height:14px;accent-color:#7158d8;vertical-align:
 .payment-overdue-notice span{font-size:12px;line-height:1.5}
 .payment-overdue-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
 .due-date-settings input{width:100%;height:36px;padding:0 10px;border:1px solid #e6e8ec;border-radius:7px;background:#fff;font-size:14px;outline:0}
-.drive-settings{grid-column:span 2}
+.drive-settings{grid-area:drive;font-family:inherit;font-size:13px}
+.drive-settings .settings-card-heading h2{font-family:inherit;font-size:14px;font-weight:600}
 .drive-connection{margin-top:16px;padding:13px;border:1px solid #eee8d9;border-radius:8px;background:#fffaf0;display:flex;align-items:center;justify-content:space-between;gap:12px}
 .drive-connection.is-connected{border-color:#d7eadc;background:#f4fbf5}
 .drive-connection>div,.backup-recovery-key,.drive-backup-row>div,.backup-history>div{display:flex;flex-direction:column;gap:5px;min-width:0}
@@ -912,25 +928,43 @@ input[type=checkbox]{width:14px;height:14px;accent-color:#7158d8;vertical-align:
 .backup-toggle{min-height:38px;display:flex;align-items:center;gap:8px;font-size:13px;color:#535968}
 .backup-toggle input{width:16px;height:16px;accent-color:#7158d4}
 .backup-recovery-key{padding:13px;border:1px solid #ece9fa;border-radius:8px;background:#fbfaff}
-.backup-status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+.backup-status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}
 .backup-status-grid>div{display:flex;flex-direction:column;gap:6px;padding:11px;border:1px solid #f0f1f3;border-radius:7px;min-width:0}
 .backup-status-grid span{font-size:11px;color:#9298a4}
 .backup-status-grid b{font-size:12px;line-height:1.45;overflow-wrap:anywhere}
+.weekly-schedule{display:flex;flex-direction:column;gap:8px}
+.weekly-schedule-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid #f0f1f3;border-radius:8px;background:#fbfbfd}
+.weekly-schedule-heading>div{display:flex;flex-direction:column;gap:4px}
+.weekly-schedule-heading b{font-size:12px;color:#434858}
+.weekly-schedule-heading span{font-size:10px;line-height:1.45;color:#9298a4}
+.weekly-schedule-day{display:grid;grid-template-columns:95px minmax(0,1fr) auto;align-items:center;gap:10px;padding:9px 11px;border:1px solid #f0f1f3;border-radius:8px}
+.weekly-schedule-day>b{font-size:11px;color:#535968}
+.weekly-schedule-times{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+.weekly-schedule-times>small{font-size:10px;color:#a0a4ae}
+.weekly-schedule-time{display:inline-flex;align-items:center;gap:4px;padding:4px 5px 4px 8px;border-radius:6px;background:#f0edff;color:#684fc7;font-size:11px;font-weight:600}
+.weekly-schedule-time button{width:18px;height:18px;padding:0;border:0;border-radius:4px;background:transparent;color:#8b7bc4;display:grid;place-items:center;cursor:pointer}
+.weekly-schedule-time button:hover{background:#e4defa}
+.weekly-schedule-add{display:flex;align-items:center;gap:6px}
+.weekly-schedule-add input{height:34px;padding:0 7px;border:1px solid #e6e8ec;border-radius:7px;background:#fff;font-size:12px}
 .drive-actions{margin-top:13px}
 .drive-backup-list,.backup-history{margin-top:14px;border-top:1px solid #f0f1f3;padding-top:12px}
 .drive-backup-list>p{font-size:12px;color:#9298a4}
 .drive-backup-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid #f2f2f4}
 .drive-backup-row b{font-size:12px;overflow-wrap:anywhere}
-.drive-backup-row span,.backup-history>div>span,.backup-history small{font-size:11px;color:#9298a4;line-height:1.4}
-.backup-history>b{font-size:13px}
-.backup-history>div{position:relative;display:grid;grid-template-columns:1fr auto;gap:4px 9px;padding:9px 0;border-bottom:1px solid #f2f2f4}
+.drive-backup-row span,.backup-history>div>span,.backup-history small{font-size:10px;color:#9298a4;line-height:1.4}
+.backup-history>b{font-size:12px}
+.backup-history-scroll{max-height:350px;overflow-y:auto;overscroll-behavior:contain;padding-right:5px}
+.backup-history-scroll>div{position:relative;display:grid;grid-template-columns:1fr auto;gap:4px 9px;padding:9px 0;border-bottom:1px solid #f2f2f4}
 .backup-history small{grid-column:1/-1;color:#ac4e54}
-.backup-history-success{font-size:11px;color:#47956c}
-.backup-history-failed{font-size:11px;color:#ac4e54}
+.backup-history-success{font-size:10px;color:#47956c}
+.backup-history-failed{font-size:10px;color:#ac4e54}
 @media(max-width:650px){
+  .settings-grid{grid-template-columns:minmax(0,1fr);grid-template-rows:auto;grid-template-areas:"organization" "photo" "backup" "drive" "account"}
   .due-date-settings .form-two{grid-template-columns:1fr}
-  .drive-settings{grid-column:span 1}
   .backup-preferences,.backup-status-grid{grid-template-columns:1fr}
+  .weekly-schedule-heading{align-items:flex-start;flex-direction:column}
+  .weekly-schedule-day{grid-template-columns:1fr;gap:7px}
+  .weekly-schedule-add{flex-wrap:wrap}
   .drive-connection,.drive-backup-row{align-items:flex-start;flex-direction:column}
   .attendance-meta{gap:10px}
   .session-stage-actions{width:100%;justify-content:flex-end}

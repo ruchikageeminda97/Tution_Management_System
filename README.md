@@ -27,7 +27,7 @@ Student and teacher pages include downloadable Excel templates and `.xlsx` impor
 - Session generation from the weekly timetable plus one-time special sessions with a chosen class, date, time and optional hall; selected halls are checked against weekly availability and overlapping bookings.
 - Attendance registers with automatic RFID scanning and student details, separate register-open/class-start/end steps with recorded timestamps, student arrival punches and late-minute tracking, automatic absent marking when a session ends, attendance PDF exports with class/teacher and attendance timing details, and a non-blocking yellow warning for unpaid monthly fees after the organization's recurring payment due day.
 - Monthly tuition collection from the payments screen or attendance register, with duplicate-payment protection.
-- Class earnings, outstanding fees, teacher commissions, organization shares and teacher-payout records, plus selectable-date daily summary PDFs covering receipts by class, teacher payouts, active students and session attendance. Printable A4 landscape annual payment-register PDFs have a separate ruled January–December sheet for each class.
+- Class earnings, outstanding fees, teacher commissions, organization shares, teacher opening payable balances (manual or Excel import) and teacher-payout records, plus selectable-date daily summary PDFs covering receipts by class, teacher payouts, active students and session attendance. Printable A4 landscape annual payment-register PDFs have a separate ruled January–December sheet for each class.
 - Editable organization details, a recurring student payment due day (1–31), configurable local photo storage, local SQLite backup/validated restore, and encrypted Google Drive backup/restore. Restore makes a safety copy of the active database.
 
 ## Data and backup notes
@@ -36,7 +36,7 @@ Each signed-in account is scoped to its organization. The database currently sup
 
 Choose a student-photo folder during first-time setup or later in Settings. Changing the folder moves existing photos there. Database backups contain student records and photo paths, but do not include the image files; keep the image folder when moving or restoring a workspace if photos must remain available.
 
-Google Drive uploads contain only an encrypted SQLite snapshot; student photos are stored outside the database and are not uploaded. Local database files and local backups are not encrypted, so keep them somewhere trusted. Google Drive backups use AES-256-GCM and cannot be recovered without the recovery passphrase.
+Google Drive uploads contain only an encrypted SQLite snapshot; student photos are stored outside the database and are not uploaded. The weekly automatic schedule supports multiple times per day, writes database snapshots to a configurable local folder, and also uploads encrypted copies when Google Drive is connected. When several run times are missed while the app is closed, reopening the app can trigger one catch-up backup rather than one per missed time. Local database files and local backups are not encrypted, so keep them somewhere trusted. Google Drive backups use AES-256-GCM and cannot be recovered without the recovery passphrase.
 
 Amounts are displayed using the computer’s locale number formatting; the app does not yet store a currency code. Choose a consistent currency for records managed in this workspace.
 

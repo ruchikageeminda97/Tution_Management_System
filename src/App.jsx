@@ -39,6 +39,15 @@ import {
 
 const api = window.tuition;
 const PAGE_SIZE = 8;
+const BACKUP_WEEKDAYS = [
+  { key: "1", label: "Monday" },
+  { key: "2", label: "Tuesday" },
+  { key: "3", label: "Wednesday" },
+  { key: "4", label: "Thursday" },
+  { key: "5", label: "Friday" },
+  { key: "6", label: "Saturday" },
+  { key: "0", label: "Sunday" },
+];
 const today = () => new Date().toISOString().slice(0, 10);
 const thisMonth = () => today().slice(0, 7);
 const shiftMonth = (month, amount) => {
@@ -531,7 +540,6 @@ function AuthScreen({ setup, onSubmit, onRecover, onResetDatabase }) {
   const [recoveryForm, setRecoveryForm] = useState({
     organization: "",
     contact: "",
-    username: "",
     password: "",
   });
   const [recovering, setRecovering] = useState(false);
@@ -609,14 +617,14 @@ function AuthScreen({ setup, onSubmit, onRecover, onResetDatabase }) {
             {setup
               ? "Set up your workspace"
               : recovering
-                ? "Claim your existing account"
+                ? "Reset your password"
                 : "Sign in to your workspace"}
           </h1>
           <p>
             {setup
               ? "Create your tuition centre account to get started. Your data stays safely on this device."
               : recovering
-                ? "Verify the tuition centre name and contact number saved on this device, then choose new sign-in details."
+                ? "Enter the tuition centre name and contact number saved on this device, then set a new password. Your existing username will stay the same."
                 : "Enter your username and password to continue managing your classes."}
           </p>
         </div>
@@ -631,17 +639,10 @@ function AuthScreen({ setup, onSubmit, onRecover, onResetDatabase }) {
             />
             <Field
               label="Contact number on file"
+              required
               value={recoveryForm.contact}
               onChange={updateRecovery("contact")}
-              placeholder="Leave blank if none was saved"
-            />
-            <Field
-              label="New username"
-              required
-              autoComplete="username"
-              value={recoveryForm.username}
-              onChange={updateRecovery("username")}
-              placeholder="Choose a username"
+              placeholder="Contact number saved during setup"
             />
             <Field
               label="New password"
@@ -655,13 +656,13 @@ function AuthScreen({ setup, onSubmit, onRecover, onResetDatabase }) {
             />
             {error && <div className="form-error">{error}</div>}
             <button className="button button-primary auth-submit" disabled={busy}>
-              {busy ? "Please wait…" : "Claim account"}
+              {busy ? "Please wait…" : "Reset password"}
               <ArrowRight size={16} />
             </button>
             <p className="auth-recovery-note">
-              This resets the administrator sign-in on this device using saved
-              workspace details, not email verification. Leave the contact
-              blank only if none was saved during setup.
+              Recovery verifies the organization name and contact number saved
+              on this device. Your username is not changed; you can sign in
+              with it and the new password after verification.
             </p>
             <button
               type="button"
@@ -735,7 +736,7 @@ function AuthScreen({ setup, onSubmit, onRecover, onResetDatabase }) {
                     setError("");
                   }}
                 >
-                  Forgot your username or password? Claim this account
+                  Forgot your password? Reset it with your organization details
                 </button>
                 <button
                   type="button"
@@ -1100,6 +1101,7 @@ function PageContent({
         version={version}
         setModal={setModal}
         notify={notify}
+        refresh={refresh}
       />
     );
   if (page === "reports")
@@ -2192,7 +2194,7 @@ function AttendancePage({ version, refresh, setModal, notify }) {
   );
 }
 
-function PaymentsPage({ version, setModal, notify }) {
+function PaymentsPage({ version, setModal, notify, refresh }) {
   const [month, setMonth] = useState(thisMonth());
   const [paymentTab, setPaymentTab] = useState("make");
   const [studentFilter, setStudentFilter] = useState("");
@@ -2541,7 +2543,7 @@ function PaymentsPage({ version, setModal, notify }) {
       )}
       </>
       ) : paymentTab === "teachers" ? (
-        <TeacherPaymentsPanel version={version} setModal={setModal} notify={notify} />
+        <TeacherPaymentsPanel version={version} setModal={setModal} notify={notify} refresh={refresh} />
       ) : (
         <PaymentReceiptLookup version={version} notify={notify} setModal={setModal} />
       )}
@@ -2664,13 +2666,15 @@ function PaymentReceiptLookup({ version, notify, setModal }) {
   const [receipt, setReceipt] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [searched, setSearched] = useState(false);
   const { data: recentReceipts, error: recentError } = useLoad(
-    () => api.payments.recentReceipts(),
-    [version],
+    () => searched ? Promise.resolve([]) : api.payments.recentReceipts(),
+    [version, searched],
   );
   const lookup = async (event) => {
     event.preventDefault();
     setLoading(true);
+    setSearched(true);
     setError("");
     setReceipt(null);
     try {
@@ -2699,20 +2703,51 @@ function PaymentReceiptLookup({ version, notify, setModal }) {
             pattern="[0-9]{8}"
             placeholder="00000001"
             value={code}
-            onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 8))}
+            onChange={(event) => {
+              setCode(event.target.value.replace(/\D/g, "").slice(0, 8));
+              setSearched(false);
+              setReceipt(null);
+              setError("");
+            }}
           />
           <Button type="submit" disabled={loading || code.length !== 8}>
             {loading ? "Searching…" : "Check payment"}
           </Button>
         </div>
       </form>
-      {error && <div className="error-inline">{error}</div>}
-      <div className="payment-recent-receipts">
-        <div className="payment-recent-heading">
-          <div><h3>Recent payments</h3><p>Latest 4 receipts, summarized by total paid.</p></div>
+      {searched ? (
+        <div className="payment-receipt-result">
+          {loading && <div className="payment-recent-empty">Searching for receipt {code}…</div>}
+          {error && <div className="error-inline">{error}</div>}
+          {receipt && (
+            <>
+              <div className="payment-receipt-summary">
+                <div><span>Receipt number</span><b>{receipt.receipt_code}</b></div>
+                <div><span>Paid on</span><b>{prettyDate(receipt.payment_date)} · {receipt.payment_time}</b></div>
+                <div><span>Payment total</span><b>{money(receipt.total)}</b></div>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>STUDENT</th><th>RFID</th><th>CLASS</th><th>FOR MONTH</th><th>AMOUNT PAID</th></tr></thead>
+                  <tbody>{receipt.rows.map((row) => (
+                    <tr key={row.payment_id}>
+                      <td><b>{row.student_name}</b></td><td>{row.rfid || "—"}</td>
+                      <td>{row.class_name}</td><td>{row.for_month}</td><td><b>{money(row.amount_paid)}</b></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+              <PaymentReceiptActions receiptCode={receipt.receipt_code} notify={notify} />
+            </>
+          )}
         </div>
-        {recentError && <div className="error-inline">{recentError}</div>}
-        {recentReceipts?.length ? (
+      ) : (
+        <div className="payment-recent-receipts">
+          <div className="payment-recent-heading">
+            <div><h3>Recent payments</h3><p>Latest 4 receipts, summarized by total paid.</p></div>
+          </div>
+          {recentError && <div className="error-inline">{recentError}</div>}
+          {recentReceipts?.length ? (
           <div className="table-wrap">
             <table>
               <thead><tr><th>RECEIPT</th><th>STUDENT(S)</th><th>PAYMENT</th><th>PAID ON</th><th>CLASSES</th><th /></tr></thead>
@@ -2746,36 +2781,16 @@ function PaymentReceiptLookup({ version, notify, setModal }) {
               ))}</tbody>
             </table>
           </div>
-        ) : !recentError && (
-          <div className="payment-recent-empty">No payments have been recorded yet.</div>
-        )}
-      </div>
-      {receipt && (
-        <div className="payment-receipt-result">
-          <div className="payment-receipt-summary">
-            <div><span>Receipt number</span><b>{receipt.receipt_code}</b></div>
-            <div><span>Paid on</span><b>{prettyDate(receipt.payment_date)} · {receipt.payment_time}</b></div>
-            <div><span>Payment total</span><b>{money(receipt.total)}</b></div>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>STUDENT</th><th>RFID</th><th>CLASS</th><th>FOR MONTH</th><th>AMOUNT PAID</th></tr></thead>
-              <tbody>{receipt.rows.map((row) => (
-                <tr key={row.payment_id}>
-                  <td><b>{row.student_name}</b></td><td>{row.rfid || "—"}</td>
-                  <td>{row.class_name}</td><td>{row.for_month}</td><td><b>{money(row.amount_paid)}</b></td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </div>
-          <PaymentReceiptActions receiptCode={receipt.receipt_code} notify={notify} />
+          ) : !recentError && (
+            <div className="payment-recent-empty">No payments have been recorded yet.</div>
+          )}
         </div>
       )}
     </section>
   );
 }
 
-function TeacherPaymentsPanel({ version, setModal, notify }) {
+function TeacherPaymentsPanel({ version, setModal, notify, refresh }) {
   const [section, setSection] = useState("balances");
   const [teacherId, setTeacherId] = useState("");
   const [period, setPeriod] = useState("3");
@@ -2823,6 +2838,30 @@ function TeacherPaymentsPanel({ version, setModal, notify }) {
       <div className="report-heading">
         <div><h2>Teacher payments</h2><p>Review teacher balances and payout history.</p></div>
         <div className="heading-actions">
+          {section === "balances" ? (
+            <>
+              <Button kind="secondary" icon={Download} onClick={async () => {
+                try {
+                  const result = await api.payouts.downloadOpeningBalanceTemplate();
+                  if (!result.canceled) notify("Teacher opening balance template downloaded.");
+                } catch (err) {
+                  notify(err.message, "error");
+                }
+              }}>Excel template</Button>
+              <Button kind="secondary" icon={Upload} onClick={async () => {
+                try {
+                  const result = await api.payouts.importOpeningBalances();
+                  if (!result.canceled) {
+                    notify(`${result.count} teacher opening balance${result.count === 1 ? "" : "s"} imported.`);
+                    refresh();
+                  }
+                } catch (err) {
+                  notify(err.message, "error");
+                }
+              }}>Import Excel</Button>
+              <Button kind="secondary" icon={Plus} onClick={() => setModal({ type: "teacher-opening-balance-form" })}>Set opening balance</Button>
+            </>
+          ) : null}
           <Button icon={Plus} onClick={() => setModal({ type: "payout-form" })}>Record teacher payout</Button>
           {section === "history" && (
             <Button kind="secondary" icon={Download} onClick={exportHistory} disabled={!payouts.data || Boolean(payouts.error)}>Export filtered PDF</Button>
@@ -2919,16 +2958,16 @@ function TeacherPaymentsPanel({ version, setModal, notify }) {
               />
             </label>
           </div>
-          <div className="report-heading compact-report-heading"><div><h2>Teacher balances</h2><p>Paid out shows this month; pending balance is total earned minus all payouts to date.</p></div></div>
+          <div className="report-heading compact-report-heading"><div><h2>Teacher balances</h2><p>Opening balance is prior unpaid teacher earnings. New collected student fees add the teacher’s commission; payouts reduce the total owed.</p></div></div>
           {balances.error && <div className="error-inline">{balances.error}</div>}
           {filteredBalances.length ? (
             <>
               <div className="table-wrap"><table>
-                <thead><tr><th>TEACHER</th><th>EARNED TO DATE</th><th>PAID THIS MONTH</th><th>PENDING BALANCE</th></tr></thead>
+                <thead><tr><th>TEACHER</th><th>OPENING BALANCE</th><th>EARNED TO DATE</th><th>PAID THIS MONTH</th><th>PENDING BALANCE</th></tr></thead>
                 <tbody>{pageSlice(filteredBalances, balancePage).map((row) => {
                   const outstanding = Number(row.outstanding);
                   return (
-                    <tr key={row.tid}><td><b>{row.name}</b></td><td>{money(row.earned)}</td><td><b className="teacher-paid-month">{money(row.paid_out_this_month)}</b></td><td><b className={`teacher-balance-badge ${outstanding > 0 ? "teacher-balance-pending" : "teacher-balance-settled"}`}>{money(outstanding)}</b></td></tr>
+                    <tr key={row.tid}><td><b>{row.name}</b></td><td>{money(row.opening_balance)}</td><td>{money(row.earned)}</td><td><b className="teacher-paid-month">{money(row.paid_out_this_month)}</b></td><td><b className={`teacher-balance-badge ${outstanding > 0 ? "teacher-balance-pending" : "teacher-balance-settled"}`}>{money(outstanding)}</b></td></tr>
                   );
                 })}</tbody>
               </table></div>
@@ -3248,8 +3287,8 @@ function ReportsPage({ version, setModal, notify, user }) {
         {filteredBalances.length ? (
           <>
             <div className="table-wrap"><table>
-              <thead><tr><th>TEACHER</th><th>EARNED TO DATE</th><th>PAID OUT</th><th>REMAINING BALANCE</th></tr></thead>
-              <tbody>{pageSlice(filteredBalances, balancePage).map((row) => <tr key={row.tid}><td><b>{row.name}</b></td><td>{money(row.earned)}</td><td>{money(row.paid_out)}</td><td><b>{money(row.outstanding)}</b></td></tr>)}</tbody>
+              <thead><tr><th>TEACHER</th><th>OPENING BALANCE</th><th>EARNED TO DATE</th><th>PAID OUT</th><th>REMAINING BALANCE</th></tr></thead>
+              <tbody>{pageSlice(filteredBalances, balancePage).map((row) => <tr key={row.tid}><td><b>{row.name}</b></td><td>{money(row.opening_balance)}</td><td>{money(row.earned)}</td><td>{money(row.paid_out)}</td><td><b>{money(row.outstanding)}</b></td></tr>)}</tbody>
             </table></div>
             <Pagination count={filteredBalances.length} page={balancePage} setPage={setBalancePage} />
           </>
@@ -3355,17 +3394,20 @@ function SettingsPage({ user, setUser, notify, refresh }) {
   const { data, error } = useLoad(() => api.settings.organization(), []);
   const [form, setForm] = useState(null);
   const [imageDirectory, setImageDirectory] = useState("");
+  const [localBackupDirectory, setLocalBackupDirectory] = useState("");
+  const [backupDirectoryBusy, setBackupDirectoryBusy] = useState(false);
   const [driveData, setDriveData] = useState(null);
   const [driveForm, setDriveForm] = useState({
     googleClientId: "",
     googleClientSecret: "",
     autoEnabled: true,
-    backupTime: "15:00",
+    weeklySchedule: Object.fromEntries(Array.from({ length: 7 }, (_, day) => [String(day), ["15:00"]])),
     retention: "30",
     missedRecovery: true,
     recoveryPassphrase: "",
     recoveryPassphraseConfirm: ""
   });
+  const [backupTimeDrafts, setBackupTimeDrafts] = useState({});
   const [driveBusy, setDriveBusy] = useState("");
   const [driveBackups, setDriveBackups] = useState(null);
   useEffect(() => {
@@ -3384,10 +3426,11 @@ function SettingsPage({ user, setUser, notify, refresh }) {
       googleClientId: result.settings.googleClientId || "",
       googleClientSecret: "",
       autoEnabled: result.settings.autoEnabled,
-      backupTime: result.settings.backupTime,
+      weeklySchedule: result.settings.weeklySchedule,
       retention: result.settings.retention,
       missedRecovery: result.settings.missedRecovery
     }));
+    setLocalBackupDirectory(result.settings.localBackupDirectory || "");
   }, []);
   useEffect(() => {
     loadDriveSettings().catch((err) => notify(err.message, "error"));
@@ -3441,7 +3484,7 @@ function SettingsPage({ user, setUser, notify, refresh }) {
         recoveryPassphraseConfirm: ""
       }));
       await loadDriveSettings();
-      notify("Google Drive backup settings saved.");
+      notify("Automatic backup schedule saved.");
     } catch (err) {
       notify(err.message, "error");
     } finally {
@@ -3531,6 +3574,54 @@ function SettingsPage({ user, setUser, notify, refresh }) {
       setImageDirectoryBusy(false);
     }
   };
+  const chooseLocalBackupDirectory = async () => {
+    try {
+      const result = await api.backup.chooseDirectory(localBackupDirectory);
+      if (!result.canceled) setLocalBackupDirectory(result.directory);
+    } catch (err) {
+      notify(err.message, "error");
+    }
+  };
+  const saveLocalBackupDirectory = async () => {
+    setBackupDirectoryBusy(true);
+    try {
+      const directory = await api.backup.saveDirectory(localBackupDirectory);
+      setLocalBackupDirectory(directory);
+      notify("Automatic local backup folder saved.");
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setBackupDirectoryBusy(false);
+    }
+  };
+  const addBackupTime = (day) => {
+    const time = backupTimeDrafts[day] || "";
+    if (!time || driveForm.weeklySchedule[day]?.includes(time)) return;
+    setDriveForm((current) => ({
+      ...current,
+      weeklySchedule: {
+        ...current.weeklySchedule,
+        [day]: [...(current.weeklySchedule[day] || []), time].sort()
+      }
+    }));
+    setBackupTimeDrafts((current) => ({ ...current, [day]: "" }));
+  };
+  const removeBackupTime = (day, time) => {
+    setDriveForm((current) => ({
+      ...current,
+      weeklySchedule: {
+        ...current.weeklySchedule,
+        [day]: current.weeklySchedule[day].filter((item) => item !== time)
+      }
+    }));
+  };
+  const applyMondayScheduleToAllDays = () => {
+    const mondayTimes = driveForm.weeklySchedule["1"] || [];
+    setDriveForm((current) => ({
+      ...current,
+      weeklySchedule: Object.fromEntries(BACKUP_WEEKDAYS.map(({ key }) => [key, [...mondayTimes]]))
+    }));
+  };
   return (
     <div className="page-content">
       <PageHeading
@@ -3539,7 +3630,7 @@ function SettingsPage({ user, setUser, notify, refresh }) {
         subtitle="Manage your tuition centre details and protect your records."
       />
       <div className="settings-grid">
-        <section className="panel settings-card">
+        <section className="panel settings-card organization-settings-card">
           <div className="settings-card-heading">
             <div className="settings-icon">
               <GraduationCap size={19} />
@@ -3596,7 +3687,7 @@ function SettingsPage({ user, setUser, notify, refresh }) {
             </form>
           )}
         </section>
-        <section className="panel settings-card">
+        <section className="panel settings-card photo-storage-card">
           <div className="settings-card-heading">
             <div className="settings-icon settings-icon-purple">
               <Users size={19} />
@@ -3623,7 +3714,7 @@ function SettingsPage({ user, setUser, notify, refresh }) {
             </div>
           </div>
         </section>
-        <section className="panel settings-card">
+        <section className="panel settings-card backup-restore-card">
           <div className="settings-card-heading">
             <div className="settings-icon settings-icon-green">
               <ShieldCheck size={19} />
@@ -3631,6 +3722,22 @@ function SettingsPage({ user, setUser, notify, refresh }) {
             <div>
               <h2>Backup &amp; restore</h2>
               <p>Your records belong to you. Keep a copy somewhere safe.</p>
+            </div>
+          </div>
+          <div className="settings-form">
+            <Field label="Automatic local backup folder" required>
+              <div className="directory-picker">
+                <input readOnly value={localBackupDirectory} placeholder="Choose a local folder" />
+                <Button kind="secondary" type="button" onClick={chooseLocalBackupDirectory} disabled={backupDirectoryBusy}>
+                  Choose folder
+                </Button>
+              </div>
+              <small>Scheduled backups are saved here, even when Google Drive is not connected.</small>
+            </Field>
+            <div className="settings-actions">
+              <Button type="button" onClick={saveLocalBackupDirectory} disabled={backupDirectoryBusy || !localBackupDirectory}>
+                {backupDirectoryBusy ? "Saving…" : "Save backup folder"}
+              </Button>
             </div>
           </div>
           <div className="backup-info">
@@ -3666,8 +3773,8 @@ function SettingsPage({ user, setUser, notify, refresh }) {
               <ShieldCheck size={19} />
             </div>
             <div>
-              <h2>Google Drive automatic backup</h2>
-              <p>Encrypted database-only backups in your own Google Drive. Student images are not uploaded.</p>
+              <h2>Automatic backup schedule</h2>
+              <p>Schedule local backups and, when connected, encrypted copies in your Google Drive. Student images are not included.</p>
             </div>
           </div>
           <div className={`drive-connection ${driveData?.connected?.connected ? "is-connected" : ""}`}>
@@ -3711,22 +3818,50 @@ function SettingsPage({ user, setUser, notify, refresh }) {
             <div className="backup-preferences">
               <label className="backup-toggle">
                 <input type="checkbox" checked={driveForm.autoEnabled} onChange={(event) => setDriveForm({ ...driveForm, autoEnabled: event.target.checked })} />
-                <span>Enable automatic daily backup</span>
+                <span>Enable scheduled backups</span>
               </label>
               <label className="backup-toggle">
                 <input type="checkbox" checked={driveForm.missedRecovery} onChange={(event) => setDriveForm({ ...driveForm, missedRecovery: event.target.checked })} />
-                <span>Run a missed backup when I next open the app</span>
+                <span>Run one backup for missed times when I next open the app</span>
               </label>
-              <Field label="Backup time (this computer’s local time)">
-                <input type="time" value={driveForm.backupTime} onChange={(event) => setDriveForm({ ...driveForm, backupTime: event.target.value })} />
-              </Field>
-              <Field label="Keep successful backups">
+              <Field label="Keep successful scheduled backups">
                 <select value={driveForm.retention} onChange={(event) => setDriveForm({ ...driveForm, retention: event.target.value })}>
                   <option value="7">Last 7 backups</option>
                   <option value="30">Last 30 backups</option>
                   <option value="all">Keep all backups</option>
                 </select>
               </Field>
+            </div>
+            <div className="weekly-schedule">
+              <div className="weekly-schedule-heading">
+                <div><b>Weekly schedule</b><span>Times use this computer’s local time. If several times were missed while the computer was off, only one catch-up backup runs.</span></div>
+                <Button kind="secondary" type="button" onClick={applyMondayScheduleToAllDays} disabled={!driveForm.weeklySchedule["1"]?.length}>
+                  Use Monday’s times every day
+                </Button>
+              </div>
+              {BACKUP_WEEKDAYS.map(({ key, label }) => {
+                const times = driveForm.weeklySchedule[key] || [];
+                const draft = backupTimeDrafts[key] || "";
+                return (
+                  <div className="weekly-schedule-day" key={key}>
+                    <b>{label}</b>
+                    <div className="weekly-schedule-times">
+                      {times.length ? times.map((time) => (
+                        <span className="weekly-schedule-time" key={time}>
+                          {time}
+                          <button type="button" aria-label={`Remove ${time} on ${label}`} onClick={() => removeBackupTime(key, time)}><X size={13} /></button>
+                        </span>
+                      )) : <small>No backups scheduled</small>}
+                    </div>
+                    <div className="weekly-schedule-add">
+                      <input type="time" aria-label={`New backup time for ${label}`} value={draft} onChange={(event) => setBackupTimeDrafts((current) => ({ ...current, [key]: event.target.value }))} />
+                      <Button kind="secondary" type="button" icon={Plus} onClick={() => addBackupTime(key)} disabled={!draft || times.includes(draft)}>
+                        Add time
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
             <div className="backup-recovery-key">
               <b>{driveData?.passphraseConfigured ? "Recovery passphrase is set on this computer" : "Set a recovery passphrase"}</b>
@@ -3741,12 +3876,13 @@ function SettingsPage({ user, setUser, notify, refresh }) {
               </div>
             </div>
             <div className="backup-status-grid">
+              <div><span>Last successful local backup</span><b>{driveData?.lastSuccessfulLocal ? new Date(`${driveData.lastSuccessfulLocal.created_at.replace(" ", "T")}Z`).toLocaleString() : "Not yet backed up"}</b></div>
               <div><span>Last successful Drive backup</span><b>{driveData?.lastSuccessful ? new Date(`${driveData.lastSuccessful.created_at.replace(" ", "T")}Z`).toLocaleString() : "Not yet backed up"}</b></div>
               <div><span>Next scheduled backup</span><b>{driveData?.settings.nextScheduled ? new Date(driveData.settings.nextScheduled).toLocaleString() : "Automatic backup is off"}</b></div>
               <div><span>Latest backup status</span><b>{driveData?.settings.lastStatus || "No scheduled result yet"}{driveData?.settings.lastError ? ` — ${driveData.settings.lastError}` : ""}</b></div>
             </div>
             <div className="settings-actions">
-              <Button type="submit" disabled={Boolean(driveBusy)}>{driveBusy === "save" ? "Saving…" : "Save Drive settings"}</Button>
+              <Button type="submit" disabled={Boolean(driveBusy)}>{driveBusy === "save" ? "Saving…" : "Save schedule and Drive settings"}</Button>
             </div>
           </form>
           <div className="backup-info drive-actions">
@@ -3782,13 +3918,15 @@ function SettingsPage({ user, setUser, notify, refresh }) {
           {driveData?.history?.length > 0 && (
             <div className="backup-history">
               <b>Recent backup history</b>
-              {driveData.history.map((item) => (
-                <div key={item.backup_id}>
-                  <span>{item.backup_type.replace("google-", "Google ")} · {new Date(`${item.created_at.replace(" ", "T")}Z`).toLocaleString()}</span>
-                  <strong className={item.status === "success" ? "backup-history-success" : "backup-history-failed"}>{item.status}</strong>
-                  {item.error_message && <small>{item.error_message}</small>}
-                </div>
-              ))}
+              <div className="backup-history-scroll">
+                {driveData.history.map((item) => (
+                  <div key={item.backup_id}>
+                    <span>{item.backup_type.replace("google-", "Google ").replace("local-scheduled", "Local scheduled").replace("local", "Local")} · {new Date(`${item.created_at.replace(" ", "T")}Z`).toLocaleString()}</span>
+                    <strong className={item.status === "success" ? "backup-history-success" : "backup-history-failed"}>{item.status}</strong>
+                    {item.error_message && <small>{item.error_message}</small>}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </section>
@@ -3946,6 +4084,8 @@ function ModalHost({
       />
     ) : modal.type === "payout-form" ? (
       <PayoutForm close={close} finish={finish} notify={notify} />
+    ) : modal.type === "teacher-opening-balance-form" ? (
+      <TeacherOpeningBalanceForm close={close} finish={finish} notify={notify} />
     ) : modal.type === "hall-form" ? (
       <HallForm
         hall={modal.hall}
@@ -4877,7 +5017,7 @@ function EnrollmentForm({ version, close, finish, notify }) {
               .filter((item) => item.status === "active")
               .map((item) => ({
                 value: String(item.class_id),
-                label: `${item.class_name} · ${money(item.fee)} monthly`,
+                label: `${item.class_name} · ${item.teacher_name} · ${money(item.fee)} monthly`,
               })),
           ]}
         />
@@ -4890,6 +5030,7 @@ function EnrollmentForm({ version, close, finish, notify }) {
           <>
             <div className="enrollment-fee-note">
               <b>{classItem.class_name}</b>
+              <span>Teacher: {classItem.teacher_name}</span>
               <span>
                 Full fee {money(classItem.fee)} · Teacher share{" "}
                 {classItem.teacher_commission_percentage}%
@@ -5353,8 +5494,21 @@ function StudentDetail({
   refresh,
 }) {
   const [student, setStudent] = useState(initial);
+  const [photoPreview, setPhotoPreview] = useState(false);
   const [card, setCard] = useState("");
   const [error, setError] = useState("");
+  const { data: studentPhoto } = useLoad(
+    () => student.stid ? api.students.photo(student.stid) : Promise.resolve(null),
+    [student.stid, version],
+  );
+  useEffect(() => {
+    if (!photoPreview) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") setPhotoPreview(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [photoPreview]);
   const { data: enrollments } = useLoad(
     () => api.students.fees(student.stid),
     [student.stid, version],
@@ -5458,7 +5612,16 @@ function StudentDetail({
       />
       <div className="student-detail">
         <div className="student-detail-top">
-          <StudentAvatar stid={student.stid} name={student.name} version={version} />
+          <button
+            type="button"
+            className={`student-profile-photo${studentPhoto ? " is-clickable" : ""}`}
+            onClick={() => studentPhoto && setPhotoPreview(true)}
+            disabled={!studentPhoto}
+            aria-label={studentPhoto ? `View ${student.name}'s photo` : `${student.name} has no profile photo`}
+          >
+            <Avatar name={student.name} photo={studentPhoto || defaultProfilePhoto} />
+            {studentPhoto && <span>View photo</span>}
+          </button>
           <div>
             <b>{student.name}</b>
             <span>
@@ -5625,6 +5788,28 @@ function StudentDetail({
           </Button>
         </div>
       </div>
+      {photoPreview && studentPhoto && (
+        <div
+          className="student-photo-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${student.name}'s profile photo`}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setPhotoPreview(false);
+          }}
+        >
+          <button
+            type="button"
+            className="icon-button student-photo-lightbox-close"
+            onClick={() => setPhotoPreview(false)}
+            aria-label="Close photo preview"
+          >
+            <X size={20} />
+          </button>
+          <img src={studentPhoto} alt={`${student.name} profile`} />
+          <span>{student.name}</span>
+        </div>
+      )}
     </>
   );
 }
@@ -6156,6 +6341,87 @@ function SessionModal({ session, version, close, refresh, notify, setModal }) {
           </aside>
         </div>
       </div>
+    </>
+  );
+}
+
+function TeacherOpeningBalanceForm({ close, finish, notify }) {
+  const { data: teachers } = useLoad(() => api.teachers.list(), []);
+  const { data: balances } = useLoad(() => api.reports.teacherBalances(), []);
+  const [form, setForm] = useState({ tid: "", amount: "0", notes: "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const selectedBalance = (balances || []).find(row => String(row.tid) === form.tid);
+  const changeTeacher = (event) => {
+    const tid = event.target.value;
+    const current = (balances || []).find(row => String(row.tid) === tid);
+    setForm({ ...form, tid, amount: current ? String(current.opening_balance) : "0" });
+  };
+  const save = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.payouts.setOpeningBalance({
+        tid: Number(form.tid),
+        amount: Number(form.amount),
+        notes: form.notes
+      });
+      notify("Teacher opening balance saved.");
+      finish();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <>
+      <ModalTitle
+        eyebrow="TEACHER PAYMENTS"
+        title="Set opening balance"
+        description="Enter the amount already owed to this teacher when you started using Tuition Manager. Saving replaces the previous opening amount."
+        close={close}
+      />
+      <form className="modal-form" onSubmit={save}>
+        <SelectField
+          label="Teacher"
+          required
+          value={form.tid}
+          onChange={changeTeacher}
+          options={[
+            { value: "", label: "Choose a teacher" },
+            ...(teachers || []).map(teacher => ({ value: String(teacher.tid), label: teacher.name }))
+          ]}
+        />
+        {form.tid && (
+          <div className="payment-review-row">
+            <div><b>Current opening balance</b><span>{selectedBalance ? money(selectedBalance.opening_balance) : money(0)}</span></div>
+          </div>
+        )}
+        <Field label="Opening amount" required>
+          <input
+            type="number"
+            min="0"
+            max="1000000000000"
+            step="0.01"
+            value={form.amount}
+            onChange={event => setForm({ ...form, amount: event.target.value })}
+            placeholder="0.00"
+            required
+          />
+        </Field>
+        <Field label="Notes">
+          <textarea
+            value={form.notes}
+            maxLength={500}
+            onChange={event => setForm({ ...form, notes: event.target.value })}
+            placeholder="Optional opening-balance details"
+          />
+        </Field>
+        {error && <div className="form-error">{error}</div>}
+        <ModalActions close={close} saving={saving} label="Save opening balance" />
+      </form>
     </>
   );
 }

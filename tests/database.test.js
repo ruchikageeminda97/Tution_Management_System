@@ -67,7 +67,6 @@ test('account recovery verifies workspace contact and replaces administrator cre
     assert.throws(() => recoverExistingAdmin(db, {
       organization: 'Bright Academy',
       contact: '555-9999',
-      username: 'new-admin',
       password: 'new-password'
     }, hashPassword), /could not verify/);
     assert.equal(db.prepare('SELECT username FROM users WHERE user_id=?').get(userId).username, 'old-admin');
@@ -75,13 +74,12 @@ test('account recovery verifies workspace contact and replaces administrator cre
     const recovered = recoverExistingAdmin(db, {
       organization: ' bright academy ',
       contact: '555-0100',
-      username: 'new-admin',
       password: 'new-password'
     }, hashPassword);
     assert.deepEqual(recovered, {
       user_id: userId,
       oid,
-      username: 'new-admin',
+      username: 'old-admin',
       organization: 'Bright Academy',
       role: 'admin'
     });
@@ -94,22 +92,20 @@ test('account recovery verifies workspace contact and replaces administrator cre
   }
 });
 
-test('account recovery still works when no workspace contact was saved', () => {
+test('account recovery requires the saved contact number and preserves the existing username', () => {
   const db = createDatabase();
   try {
     const oid = db.prepare('INSERT INTO organizations (name) VALUES (?)')
       .run('Local Academy').lastInsertRowid;
-    db.prepare('INSERT INTO users (oid,username,password_hash,role) VALUES (?,?,?,?)')
-      .run(oid, 'old-admin', 'old-hash', 'admin');
+    const userId = db.prepare('INSERT INTO users (oid,username,password_hash,role) VALUES (?,?,?,?)')
+      .run(oid, 'original-admin', 'old-hash', 'admin').lastInsertRowid;
 
-    const recovered = recoverExistingAdmin(db, {
+    assert.throws(() => recoverExistingAdmin(db, {
       organization: 'Local Academy',
       contact: '',
-      username: 'new-admin',
       password: 'new-password'
-    }, (password) => ({ salt: 'test-salt', hash: `hash-${password}` }));
-    assert.equal(recovered.username, 'new-admin');
-    assert.equal(recovered.oid, oid);
+    }, (password) => ({ salt: 'test-salt', hash: `hash-${password}` })), /contact number/);
+    assert.equal(db.prepare('SELECT password_hash FROM users WHERE user_id=?').get(userId).password_hash, 'old-hash');
   } finally {
     db.close();
   }
@@ -119,7 +115,7 @@ test('schema creates the full tenant-scoped tuition management data model', () =
   const db = createDatabase();
   try {
     const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
-    for (const table of ['organizations', 'users', 'students', 'teachers', 'halls', 'hall_availability', 'classes', 'class_schedules', 'class_enrollments', 'sessions', 'attendance', 'payment_receipts', 'payments', 'teacher_payouts', 'teacher_payout_details', 'backup_logs']) {
+    for (const table of ['organizations', 'users', 'students', 'teachers', 'halls', 'hall_availability', 'classes', 'class_schedules', 'class_enrollments', 'sessions', 'attendance', 'payment_receipts', 'payments', 'teacher_payouts', 'teacher_payout_details', 'teacher_opening_balances', 'backup_logs']) {
       assert.ok(tables.has(table), `missing ${table}`);
     }
     const paymentColumns = new Set(db.pragma('table_info(payments)').map(column => column.name));
@@ -801,6 +797,35 @@ test('monthly earnings split collected and discounted outstanding fees correctly
     assert.equal(result.pending_teacher, 800);
     assert.equal(result.pending_org, 200);
     assert.equal(db.prepare('SELECT enrollment_id FROM class_enrollments WHERE enrollment_id=?').get(secondEnrollment).enrollment_id, secondEnrollment);
+  } finally {
+    db.close();
+  }
+});
+
+test('teacher opening balances add to future student-derived earnings and payouts reduce what is owed', () => {
+  const db = createDatabase();
+  try {
+    const { teacher, enrollment } = seed(db);
+    const balance = db.prepare(`INSERT INTO teacher_opening_balances (tid,opening_amount,notes)
+      VALUES (?,?,?) ON CONFLICT(tid) DO UPDATE SET opening_amount=excluded.opening_amount,
+      notes=excluded.notes,updated_at=CURRENT_TIMESTAMP`);
+    balance.run(teacher, 600, 'Before system setup');
+    balance.run(teacher, 750, 'Corrected opening balance');
+    db.prepare(`INSERT INTO payments
+      (enrollment_id,for_month,amount_paid,payment_date,payment_time) VALUES (?,?,?,?,?)`)
+      .run(enrollment, '2026-09', 500, '2026-09-01', '09:00:00');
+    db.prepare('INSERT INTO teacher_payouts (tid,amount,payout_date) VALUES (?,?,?)')
+      .run(teacher, 100, '2026-09-02');
+
+    const result = db.prepare(`SELECT
+      COALESCE((SELECT opening_amount FROM teacher_opening_balances WHERE tid=t.tid),0) AS opening_balance,
+      COALESCE((SELECT SUM(p.amount_paid*c.teacher_commission_percentage/100.0)
+        FROM payments p JOIN class_enrollments e ON e.enrollment_id=p.enrollment_id
+        JOIN classes c ON c.class_id=e.class_id WHERE c.tid=t.tid AND c.oid=t.oid),0) AS earned,
+      COALESCE((SELECT SUM(amount) FROM teacher_payouts WHERE tid=t.tid),0) AS paid_out
+      FROM teachers t WHERE t.tid=?`).get(teacher);
+    assert.deepEqual(result, { opening_balance: 750, earned: 400, paid_out: 100 });
+    assert.equal(result.opening_balance + result.earned - result.paid_out, 1050);
   } finally {
     db.close();
   }

@@ -5,7 +5,7 @@ This guide explains the day-to-day functions of the desktop app, in the order mo
 ## 1. First sign-in and navigation
 
 1. Open the desktop app. On a new installation, create the tuition centre workspace and administrator account, and choose a local folder for student photos; otherwise, sign in with the account already set up.
-2. Sign-in uses a username, not an email address. If you forget your username or password, choose **Forgot your username or password? Claim this account** and enter the workspace name and contact number saved on this computer. If no contact number was saved, leave that field blank. Recovery replaces the administrator username and password; it checks saved workspace details and does not verify identity through email.
+2. Sign-in uses a username, not an email address. If you forget your password, choose **Forgot your password? Reset it with your organization details** and enter the organization name and contact number saved on this computer. Recovery sets a new password and keeps the existing username; after recovery, you are signed in and can see that username in your account menu. Recovery verifies saved workspace details on this device; it does not verify identity through email.
 3. If you cannot recover the account, choose **Reset all local data and start over** on the sign-in screen. Confirm the warning to erase all app records on this computer and return to first-time setup. This is permanent; use a backup if you need to keep your data.
 4. Use the left navigation to open **Overview**, **Attendance**, **Payments**, **Reports**, **Students**, **Teachers**, **Classes**, or **Halls**. Open **Settings** near the bottom of the sidebar.
 5. On a smaller window, open the navigation drawer with the menu button.
@@ -69,10 +69,11 @@ You can add or edit records later. For example, add a new student before enrolli
 
 Teacher earnings are calculated from tuition payments for classes assigned to that teacher and each class's commission percentage. Recording a payout logs money actually paid; it does not itself collect student tuition.
 
-1. Open **Payments → Teacher payments → Balances** to see this month's paid-out total, the total pending teacher balance, and each teacher's earned-to-date, paid-this-month and pending balance.
-2. Filter the table by teacher if needed.
-3. Select **Record teacher payout** to record an actual payment. Enter the teacher, date, amount, any class/month allocation and optional notes in the form.
-4. Open **Payout history** to filter recorded payouts by teacher and period. The history can be exported as a PDF.
+1. When moving an existing tuition centre into Tuition Manager, use **Set opening balance** to enter the amount already owed to a teacher before the app started tracking student payments. You can also download the Excel template and import multiple opening balances. Each import row must match a teacher name in the current workspace; importing an existing teacher replaces that teacher's opening amount, while omitted teachers are unchanged.
+2. Open **Payments → Teacher payments → Balances** to see the opening balance, teacher earnings from recorded student tuition, this month's payouts and remaining amount owed. New student tuition payments add the configured teacher commission to earned-to-date; if no opening amount is entered, it defaults to zero.
+3. Filter the table by teacher if needed.
+4. Select **Record teacher payout** to record an actual payment. Enter the teacher, date, amount, any class/month allocation and optional notes in the form.
+5. Open **Payout history** to filter recorded payouts by teacher and period. The history can be exported as a PDF.
 
 ## 6. Halls
 
@@ -168,7 +169,7 @@ Select a student and choose a period (recent months, a selected month or a custo
 3. Select **Record teacher payout**, enter the payout details, and save only after the payment has actually been made.
 4. Review it in **Payout history**, where you can filter by teacher and period or export a PDF.
 
-The green paid-this-month value is the amount of payouts recorded in the current calendar month. Pending balance is the teacher's earned amount to date minus payouts already recorded.
+The green paid-this-month value is the amount of payouts recorded in the current calendar month. Pending balance is opening balance plus earned teacher commission from student payments, minus payouts already recorded. Opening balances are tracked separately and do not create or alter student payment records.
 
 ## 10. Reports
 
@@ -222,20 +223,23 @@ At the top of Reports, choose a date in the daily-summary section and select its
 ### Back up or restore
 
 1. Open **Settings → Backup & restore**.
-2. Select **Back up now** and choose a folder and filename for a local database copy. Store the backup somewhere safe, preferably separate from the computer.
-3. To restore, select **Choose file** and choose a verified database backup. A safety copy of the current database is made before the restore.
-4. The app refreshes after a successful restore. Make sure you selected the intended backup because restoring replaces the current workspace data with the backup's data.
-5. Backups include database records and photo paths, not the actual image files. Keep the student photo folder when moving the app or restoring a backup if you need the photos.
+2. Choose and save the **Automatic local backup folder** for scheduled database copies. The folder can be on another drive.
+3. Select **Back up now** and choose a folder and filename for an immediate local database copy. Store the backup somewhere safe, preferably separate from the computer.
+4. To restore, select **Choose file** and choose a verified database backup. A safety copy of the current database is made before the restore.
+5. The app refreshes after a successful restore. Make sure you selected the intended backup because restoring replaces the current workspace data with the backup's data.
+6. Backups include database records and photo paths, not the actual image files. Keep the student photo folder when moving the app or restoring a backup if you need the photos.
 
 ### Configure Google Drive backup
 
-1. Complete the Google Cloud Console setup in [`new.md`](new.md), then open **Settings → Google Drive automatic backup**.
-2. Enter the matching Desktop OAuth Client ID and Client secret from Google Cloud → Clients, choose and confirm a recovery passphrase of at least 12 characters, set the automatic backup time/retention options, and save. The Client secret is masked and protected by operating-system storage.
-3. Select **Connect Google Drive** and approve access in the system browser. The app can only manage its own Tuition Manager backup files.
-4. Use **Backup Now** for an immediate encrypted backup, or leave automatic backup enabled for the configured local time. Scheduled backups run only while the app is running and signed in; the default missed-run option catches up when you next open the app and sign in.
-5. Use **List backups** and **Restore** to restore a Drive backup. Confirm the replacement prompt. The app retains a local safety copy and returns to sign-in after restoring.
-6. On another computer, configure the same Desktop OAuth Client ID and Client secret, connect the same Google account, enter the same tuition-centre name, set the original recovery passphrase, and select the intended Drive backup. Sign in with credentials contained in that backup after restoration.
-7. Keep the recovery passphrase separately and safely. Changing it affects new backups only; older backups still require the passphrase that encrypted them. Neither Drive nor local database backups include the actual student image files.
+1. Complete the Google Cloud Console setup in [`new.md`](new.md), then open **Settings → Automatic backup schedule**.
+2. Enable scheduled backups and add one or more local-time backup times for each weekday. Use **Use Monday’s times every day** to repeat Monday’s times on all seven days. Save the schedule to run local backups and, when connected, encrypted Google Drive backups. The successful-backup retention setting applies to scheduled copies.
+3. Choose **Run one backup for missed times when I next open the app** to catch up after the app or computer was off. If several scheduled times were missed, only one backup runs; missed times do not create duplicate backups.
+4. To include Google Drive, enter the matching Desktop OAuth Client ID and Client secret from Google Cloud → Clients, choose and confirm a recovery passphrase of at least 12 characters, and save. The Client secret is masked and protected by operating-system storage.
+5. Select **Connect Google Drive** and approve access in the system browser. The app can only manage its own Tuition Manager backup files.
+6. Use **Backup Now** for an immediate encrypted Drive backup. Scheduled backups run only while the app is running and signed in; the default missed-run option catches up when you next open the app and sign in.
+7. Use **List backups** and **Restore** to restore a Drive backup. Confirm the replacement prompt. The app retains a local safety copy and returns to sign-in after restoring.
+8. On another computer, configure the same Desktop OAuth Client ID and Client secret, connect the same Google account, enter the same tuition-centre name, set the original recovery passphrase, and select the intended Drive backup. Sign in with credentials contained in that backup after restoration.
+9. Keep the recovery passphrase separately and safely. Changing it affects new backups only; older backups still require the passphrase that encrypted them. Neither Drive nor local database backups include the actual student image files.
 
 ## 12. Helpful operating notes
 
@@ -248,4 +252,4 @@ At the top of Reports, choose a date in the daily-summary section and select its
 - Back up regularly, especially before restoring a database or moving the app to another computer.
 - Amounts use the computer's locale number formatting. The app does not currently store a separate currency code; use one consistent currency for records in a workspace.
 - The database and local backup files are not encrypted. Protect the computer and any folders containing backups.
-- Current account-management features do not expose staff-account creation in the interface. Google Drive automatic backups do not run while the app is closed; keep local backups as an additional recovery option.
+- Current account-management features do not expose staff-account creation in the interface. Automatic backups do not run while the app is closed; a single backup can catch up when the app is reopened and signed in.

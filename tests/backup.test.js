@@ -6,7 +6,7 @@ const test = require('node:test');
 const Database = require('better-sqlite3');
 const { decryptBackup, encryptBackup } = require('../main/services/backup-crypto');
 const { createCloudBackup, prepareRestoreFile, validateDatabaseFile } = require('../main/services/backup-service');
-const { backupIsDue, createBackupScheduler, localDate } = require('../main/services/backup-scheduler');
+const { backupIsDue, createBackupScheduler, dueScheduledSlot, localDate } = require('../main/services/backup-scheduler');
 const { expiredBackups, GoogleDriveService, retry } = require('../main/services/google-drive');
 const { SecureStore } = require('../main/services/secure-store');
 const { migrateBackupSettings } = require('../main/database');
@@ -124,27 +124,36 @@ test('existing local database backups without Drive metadata remain compatible',
   }
 });
 
-test('daily schedule only runs after the configured local time and once per local date', () => {
-  const settings = { auto_enabled: 1, backup_time: '15:00', last_scheduled_date: null };
-  const before = new Date(2026, 9, 12, 14, 59, 59);
-  const after = new Date(2026, 9, 12, 15, 0, 0);
+test('weekly schedule supports multiple daily times and runs only the latest missed slot', () => {
+  const settings = {
+    auto_enabled: 1,
+    weekly_schedule: JSON.stringify({ 1: ['07:00', '12:00', '14:00', '17:00'], 2: ['15:00', '18:00'] }),
+    last_scheduled_slot: null
+  };
+  const before = new Date(2026, 9, 12, 6, 59, 59);
+  const after = new Date(2026, 9, 12, 17, 30, 0);
   assert.equal(backupIsDue(settings, before), false);
-  assert.equal(backupIsDue(settings, after), true);
-  assert.equal(backupIsDue({ ...settings, last_scheduled_date: localDate(after) }, after), false);
+  assert.equal(dueScheduledSlot(settings, after), '2026-10-12T17:00');
+  assert.equal(dueScheduledSlot({ ...settings, last_scheduled_slot: '2026-10-12T17:00' }, after), null);
+  assert.equal(dueScheduledSlot(settings, new Date(2026, 9, 13, 15, 30)), '2026-10-13T15:00');
   assert.equal(backupIsDue({ ...settings, auto_enabled: 0 }, after), false);
 });
 
-test('scheduler coalesces concurrent checks and recovers one missed daily backup', async () => {
-  let current = new Date(2026, 9, 12, 16, 0);
+test('scheduler coalesces concurrent checks and accepts a persisted slot key', async () => {
+  let current = new Date(2026, 9, 12, 17, 30);
   let count = 0;
   let finish;
   const gate = new Promise(resolve => { finish = resolve; });
   const scheduler = createBackupScheduler({
-    getSettings: () => ({ auto_enabled: 1, backup_time: '15:00', last_scheduled_date: null }),
+    getSettings: () => ({
+      auto_enabled: 1,
+      weekly_schedule: { 1: ['15:00', '17:00'], 2: ['15:00', '17:00'] },
+      last_scheduled_slot: count ? '2026-10-12T17:00' : null
+    }),
     now: () => current,
-    runScheduled: async date => {
+    runScheduled: async slot => {
       count += 1;
-      assert.equal(date, count === 1 ? '2026-10-12' : '2026-10-13');
+      assert.equal(slot, count === 1 ? '2026-10-12T17:00' : '2026-10-13T17:00');
       await gate;
     }
   });
@@ -154,22 +163,26 @@ test('scheduler coalesces concurrent checks and recovers one missed daily backup
   assert.equal(await scheduler.check(), false);
   finish();
   assert.equal(await first, true);
-  current = new Date(2026, 9, 13, 16, 0);
+  current = new Date(2026, 9, 13, 17, 30);
   await scheduler.check();
   assert.equal(count, 2);
 });
 
-test('missed backup setting suppresses a backup missed while the app was closed', async () => {
+test('disabled missed recovery skips only the missed slot but keeps future times', async () => {
   let calls = 0;
+  let current = new Date(2026, 9, 12, 15, 30);
   const scheduler = createBackupScheduler({
-    getSettings: () => ({ auto_enabled: 1, missed_recovery: 0, backup_time: '15:00', last_scheduled_date: null }),
-    now: () => new Date(2026, 9, 12, 16, 0),
-    runScheduled: async () => { calls += 1; }
+    getSettings: () => ({ auto_enabled: 1, missed_recovery: 0, weekly_schedule: { 1: ['15:00', '16:00'] } }),
+    now: () => current,
+    runScheduled: async slot => { calls += 1; assert.equal(slot, '2026-10-12T16:00'); }
   });
   scheduler.start();
   await scheduler.check();
-  scheduler.stop();
   assert.equal(calls, 0);
+  current = new Date(2026, 9, 12, 16, 0);
+  await scheduler.check();
+  scheduler.stop();
+  assert.equal(calls, 1);
 });
 
 test('retention keeps the newest valid file and supports keeping all backups', () => {
@@ -492,16 +505,24 @@ test('OS secure store encrypts settings and refuses writes without native encryp
   }
 });
 
-test('backup migration adds metadata columns once on existing databases', () => {
+test('backup migration adds scheduling and metadata columns once on existing databases', () => {
   const database = new Database(':memory:');
   try {
     database.exec(`CREATE TABLE backup_logs (backup_id INTEGER PRIMARY KEY,oid INTEGER,backup_type TEXT,file_path TEXT,status TEXT,created_at TEXT);
-      CREATE TABLE backup_settings (oid INTEGER PRIMARY KEY,google_client_id TEXT,auto_enabled INTEGER,backup_time TEXT,retention TEXT,missed_recovery INTEGER,last_scheduled_date TEXT,last_status TEXT,last_error TEXT,last_backup_at TEXT)`);
+      CREATE TABLE backup_settings (oid INTEGER PRIMARY KEY,google_client_id TEXT,auto_enabled INTEGER,backup_time TEXT,retention TEXT,missed_recovery INTEGER,last_scheduled_date TEXT,last_status TEXT,last_error TEXT,last_backup_at TEXT);
+      INSERT INTO backup_settings (oid,backup_time,last_scheduled_date) VALUES (4,'06:30','2026-10-12')`);
     migrateBackupSettings(database);
     migrateBackupSettings(database);
+    const columns = new Set(database.pragma('table_info(backup_settings)').map(column => column.name));
     assert.ok(new Set(database.pragma('table_info(backup_logs)').map(column => column.name)).has('error_message'));
-    assert.ok(new Set(database.pragma('table_info(backup_settings)').map(column => column.name)).has('retry_after'));
-    assert.equal(database.pragma('user_version', { simple: true }), 2);
+    assert.ok(columns.has('retry_after'));
+    assert.ok(columns.has('weekly_schedule'));
+    assert.ok(columns.has('local_backup_directory'));
+    assert.ok(columns.has('last_scheduled_slot'));
+    const migrated = database.prepare('SELECT weekly_schedule,last_scheduled_slot FROM backup_settings WHERE oid=4').get();
+    assert.equal(JSON.parse(migrated.weekly_schedule)['1'][0], '06:30');
+    assert.equal(migrated.last_scheduled_slot, '2026-10-12T06:30');
+    assert.equal(database.pragma('user_version', { simple: true }), 3);
   } finally {
     database.close();
   }

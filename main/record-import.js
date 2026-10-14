@@ -47,6 +47,23 @@ const definitions = {
       description: 'description',
       about: 'description'
     }
+  },
+  'teacher-opening-balances': {
+    columns: [
+      ['Teacher Name', 'name'],
+      ['Opening Balance', 'opening_balance'],
+      ['Notes', 'notes']
+    ],
+    aliases: {
+      name: 'name',
+      teacher: 'name',
+      teachername: 'name',
+      openingbalance: 'opening_balance',
+      pendingpayment: 'opening_balance',
+      pendingamount: 'opening_balance',
+      amount: 'opening_balance',
+      notes: 'notes'
+    }
   }
 };
 
@@ -92,7 +109,9 @@ async function parseExcelRecords(buffer, kind) {
   if (sheet.rowCount > 5001) throw new Error('Import files can contain at most 5,000 records.');
   const headers = sheet.getRow(1).values.slice(1).map(normalizeHeader);
   const mappedHeaders = headers.map((header) => definition.aliases[header] || null);
-  const required = kind === 'students' ? ['name', 'contact1'] : ['name'];
+  const required = kind === 'students' ? ['name', 'contact1']
+    : kind === 'teacher-opening-balances' ? ['name', 'opening_balance']
+      : ['name'];
   const missing = required.filter((column) => !mappedHeaders.includes(column));
   if (missing.length) {
     const labels = missing.map((column) => definition.columns.find(([, key]) => key === column)[0]);
@@ -122,6 +141,19 @@ async function parseExcelRecords(buffer, kind) {
       }
       record.status = (record.status || 'active').toLowerCase();
       if (!['active', 'inactive'].includes(record.status)) errors.push(`Row ${rowNumber}: status must be active or inactive.`);
+    } else if (kind === 'teacher-opening-balances') {
+      const rawAmount = record.opening_balance;
+      const amount = typeof rawAmount === 'number'
+        ? rawAmount
+        : Number(String(rawAmount || '').trim());
+      if (rawAmount === '' || rawAmount === null || rawAmount === undefined ||
+        !Number.isFinite(amount) || amount < 0 || amount > 1_000_000_000_000) {
+        errors.push(`Row ${rowNumber}: opening balance must be a number from 0 to 1,000,000,000,000.`);
+      } else if (Math.round(amount * 100) / 100 !== amount) {
+        errors.push(`Row ${rowNumber}: opening balance can have at most two decimal places.`);
+      } else {
+        record.opening_balance = amount;
+      }
     }
     records.push(record);
   });
@@ -135,12 +167,15 @@ async function createTemplateBuffer(kind) {
   if (!definition) throw new Error('Choose student or teacher records to import.');
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Tuition Manager';
-  const sheet = workbook.addWorksheet(kind === 'students' ? 'Students' : 'Teachers');
+  const sheet = workbook.addWorksheet(kind === 'students' ? 'Students'
+    : kind === 'teacher-opening-balances' ? 'Opening Balances' : 'Teachers');
   sheet.columns = definition.columns.map(([header, key]) => ({
     header,
     key,
     width: Math.max(header.length + 5, 20),
-    numFmt: ['contact', 'contact1', 'contact2'].includes(key) ? '@' : key === 'birthday' ? 'yyyy-mm-dd' : undefined
+    numFmt: ['contact', 'contact1', 'contact2'].includes(key) ? '@'
+      : key === 'birthday' ? 'yyyy-mm-dd'
+        : key === 'opening_balance' ? '0.00' : undefined
   }));
   sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
   sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7357DC' } };

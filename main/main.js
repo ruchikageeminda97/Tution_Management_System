@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { openDatabase, getDatabase, resetDatabase } = require('./database');
 const { createCloudBackup, prepareRestoreFile, validateDatabaseFile } = require('./services/backup-service');
-const { createBackupScheduler, localDate: backupLocalDate } = require('./services/backup-scheduler');
+const { createBackupScheduler, localDate: backupLocalDate, parseWeeklySchedule } = require('./services/backup-scheduler');
 const { GoogleDriveService } = require('./services/google-drive');
 const { SecureStore } = require('./services/secure-store');
 const { overlaps, slotIsAvailable, validateSlots, validTime } = require('./scheduling');
@@ -88,8 +88,45 @@ function recordBackup(oid, type, filePath, status, error) {
 
 function checkScheduledBackupAfterLogin() {
   if (backupScheduler) {
-    void backupScheduler.checkStartup().catch(error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error)));
+    void backupScheduler.checkStartup().catch(error => console.error('Scheduled backup failed:', backupErrorMessage(error)));
   }
+}
+
+function defaultLocalBackupDirectory() {
+  return path.join(app.getPath('documents'), 'Tuition Manager Backups');
+}
+
+function pruneLocalScheduledBackups(directory, retention) {
+  if (retention === 'all') return;
+  if (!['7', '30'].includes(retention)) throw new Error('Choose a valid backup retention setting.');
+  const keep = Number(retention);
+  const files = fs.readdirSync(directory, { withFileTypes: true })
+    .filter(entry => entry.isFile() && /^tuition-backup-\d{4}-\d{2}-\d{2}_\d{4}\.db$/.test(entry.name))
+    .map(entry => entry.name)
+    .sort()
+    .reverse();
+  for (const file of files.slice(keep)) fs.rmSync(path.join(directory, file));
+}
+
+function validateWeeklySchedule(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Choose at least one valid weekly backup time.');
+  }
+  const schedule = {};
+  for (let day = 0; day < 7; day += 1) {
+    const times = value[day];
+    if (!Array.isArray(times) || times.some(time => typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) {
+      throw new Error('Choose valid backup times for each day.');
+    }
+    schedule[day] = [...new Set(times)].sort();
+    if (schedule[day].length !== times.length || schedule[day].length > 24) {
+      throw new Error('Each day must have unique backup times, with no more than 24 times.');
+    }
+  }
+  if (!Object.values(schedule).some(times => times.length)) {
+    throw new Error('Add at least one time to the weekly backup schedule.');
+  }
+  return schedule;
 }
 
 async function runGoogleBackup(type, scheduledDate) {
@@ -99,7 +136,7 @@ async function runGoogleBackup(type, scheduledDate) {
   if (type === 'google-scheduled' && !settings.auto_enabled) {
     throw new Error('Automatic Google Drive backups are disabled.');
   }
-  if (type === 'google-scheduled' && settings.last_scheduled_date === scheduledDate) {
+  if (type === 'google-scheduled' && settings.last_scheduled_slot === scheduledDate) {
     return { skipped: true };
   }
   const connected = driveService.status(user.oid).connected;
@@ -129,10 +166,13 @@ async function runGoogleBackup(type, scheduledDate) {
     const retention = await driveService.retentionForSettings(user.oid, settings.retention, uploaded.id, orgKey)
       .catch(error => ({ deleted: 0, errors: [backupErrorMessage(error)] }));
     getDatabase().prepare(`UPDATE backup_settings
-      SET last_status='success',last_error=?,last_backup_at=?,last_scheduled_date=CASE WHEN ? IS NULL THEN last_scheduled_date ELSE ? END,retry_after=NULL
+      SET last_status='success',last_error=?,last_backup_at=?,
+        last_scheduled_date=CASE WHEN ? IS NULL THEN last_scheduled_date ELSE ? END,
+        last_scheduled_slot=CASE WHEN ? IS NULL THEN last_scheduled_slot ELSE ? END,retry_after=NULL
       WHERE oid=?`).run(
       retention.errors.length ? `Backup uploaded; retention cleanup: ${retention.errors.join('; ')}` : null,
-      new Date().toISOString(), scheduledDate || null, scheduledDate || null, user.oid
+      new Date().toISOString(), scheduledDate ? scheduledDate.slice(0, 10) : null,
+      scheduledDate ? scheduledDate.slice(0, 10) : null, scheduledDate || null, scheduledDate || null, user.oid
     );
     recordBackup(user.oid, type, uploaded.id, 'success',
       retention.errors.length ? new Error(`Upload succeeded, but some old backups could not be removed: ${retention.errors.join('; ')}`) : null);
@@ -146,6 +186,50 @@ async function runGoogleBackup(type, scheduledDate) {
   } finally {
     backupOperationRunning = false;
   }
+}
+
+async function runScheduledLocalBackup(slot) {
+  if (backupOperationRunning) throw new Error('Another backup or restore operation is already in progress.');
+  const user = requireUser();
+  const settings = getBackupSettings(user.oid);
+  const directory = settings.local_backup_directory || defaultLocalBackupDirectory();
+  const filename = `tuition-backup-${slot.replace('T', '_').replace(':', '')}.db`;
+  const destination = path.join(directory, filename);
+  backupOperationRunning = true;
+  let temporaryPath;
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+    temporaryPath = `${destination}.${crypto.randomUUID()}.tmp`;
+    await getDatabase().backup(temporaryPath);
+    validateDatabaseFile(temporaryPath, user.oid);
+    if (fs.existsSync(destination)) fs.rmSync(destination);
+    fs.renameSync(temporaryPath, destination);
+    pruneLocalScheduledBackups(directory, settings.retention);
+    recordBackup(user.oid, 'local-scheduled', destination, 'success');
+    return destination;
+  } catch (error) {
+    recordBackup(user.oid, 'local-scheduled', destination, 'failed', error);
+    getDatabase().prepare(`UPDATE backup_settings SET last_status='failed',last_error=?,retry_after=? WHERE oid=?`)
+      .run(backupErrorMessage(error), new Date(Date.now() + 15 * 60 * 1000).toISOString(), user.oid);
+    throw error;
+  } finally {
+    if (temporaryPath && fs.existsSync(temporaryPath)) fs.rmSync(temporaryPath, { force: true });
+    backupOperationRunning = false;
+  }
+}
+
+async function runScheduledBackups(slot) {
+  const user = requireUser();
+  const settings = getBackupSettings(user.oid);
+  if (!settings.auto_enabled) return { skipped: true };
+  await runScheduledLocalBackup(slot);
+  if (driveService.status(user.oid).connected && driveService.getPassphrase(user.oid)) {
+    return runGoogleBackup('google-scheduled', slot);
+  }
+  getDatabase().prepare(`UPDATE backup_settings SET last_status='success',last_error=NULL,last_backup_at=?,
+    last_scheduled_date=?,last_scheduled_slot=?,retry_after=NULL WHERE oid=?`)
+    .run(new Date().toISOString(), slot.slice(0, 10), slot, user.oid);
+  return { localBackup: true };
 }
 
 async function restoreDatabaseFile(source, {
@@ -285,6 +369,32 @@ function registerIpc() {
     return result.canceled || !result.filePaths[0]
       ? { canceled: true }
       : { canceled: false, directory: result.filePaths[0] };
+  });
+  ipcMain.handle('backup:chooseDirectory', async (_event, currentPath) => {
+    const preferredPath = typeof currentPath === 'string' && fs.existsSync(currentPath)
+      ? currentPath
+      : app.getPath('documents');
+    const result = await dialog.showOpenDialog(window, {
+      title: 'Choose automatic backup folder',
+      defaultPath: preferredPath,
+      properties: ['openDirectory', 'createDirectory']
+    });
+    return result.canceled || !result.filePaths[0]
+      ? { canceled: true }
+      : { canceled: false, directory: result.filePaths[0] };
+  });
+  ipcMain.handle('backup:saveDirectory', (_event, directory) => {
+    const user = requireUser();
+    const selected = String(directory || '').trim();
+    if (!path.isAbsolute(selected) || selected.length > 1024) {
+      throw new Error('Choose a valid automatic backup folder.');
+    }
+    if (fs.existsSync(selected) && !fs.statSync(selected).isDirectory()) {
+      throw new Error('The automatic backup folder must be a directory.');
+    }
+    getDatabase().prepare('UPDATE backup_settings SET local_backup_directory=? WHERE oid=?')
+      .run(selected, user.oid);
+    return selected;
   });
   ipcMain.handle('auth:setup', (_event, input) => {
     const name = String(input.organization || '').trim();
@@ -1165,6 +1275,7 @@ function registerIpc() {
   });
   ipcMain.handle('reports:teacherBalances', () => getDatabase().prepare(`
     SELECT t.tid,t.name,
+      COALESCE((SELECT b.opening_amount FROM teacher_opening_balances b WHERE b.tid=t.tid),0) AS opening_balance,
       COALESCE((SELECT SUM(p.amount_paid*c.teacher_commission_percentage/100.0)
         FROM payments p JOIN class_enrollments e ON e.enrollment_id=p.enrollment_id
         JOIN classes c ON c.class_id=e.class_id WHERE c.tid=t.tid AND c.oid=t.oid),0) AS earned,
@@ -1174,7 +1285,7 @@ function registerIpc() {
     FROM teachers t WHERE t.oid=? ORDER BY t.name`).all(currentMonth(), org()).map(row => ({
       ...row,
       paid_out_this_month: money(row.paid_out_this_month),
-      outstanding: money(row.earned - row.paid_out)
+      outstanding: money(row.opening_balance + row.earned - row.paid_out)
     })));
   ipcMain.handle('reports:paymentRecords', (_event, filters = {}) => {
     const db = getDatabase();
@@ -1397,6 +1508,68 @@ function registerIpc() {
     });
     return save();
   });
+  ipcMain.handle('payouts:setOpeningBalance', (_event, input = {}) => {
+    const db = getDatabase();
+    const tid = Number(input.tid);
+    const rawAmount = input.amount;
+    const amount = Number(input.amount);
+    const teacher = db.prepare('SELECT tid FROM teachers WHERE tid=? AND oid=?').get(tid, org());
+    if (!teacher || rawAmount === '' || rawAmount === null || rawAmount === undefined ||
+      !Number.isFinite(amount) || amount < 0 || amount > 1_000_000_000_000 ||
+      Math.round(amount * 100) / 100 !== amount) {
+      throw new Error('Choose a teacher and enter an opening balance from 0 to 1,000,000,000,000 with at most two decimal places.');
+    }
+    const notes = String(input.notes || '').trim();
+    if (notes.length > 500) throw new Error('Opening balance notes must be 500 characters or fewer.');
+    db.prepare(`INSERT INTO teacher_opening_balances (tid,opening_amount,notes)
+      VALUES (?,?,?) ON CONFLICT(tid) DO UPDATE SET
+      opening_amount=excluded.opening_amount,notes=excluded.notes,updated_at=CURRENT_TIMESTAMP`)
+      .run(tid, amount, notes);
+    return true;
+  });
+  ipcMain.handle('payouts:downloadOpeningBalanceTemplate', async () => {
+    requireUser();
+    const result = await dialog.showSaveDialog(window, {
+      title: 'Download teacher opening balance template',
+      defaultPath: 'teacher-opening-balances-template.xlsx',
+      filters: [{ name: 'Excel workbook', extensions: ['xlsx'] }]
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    const filePath = result.filePath.toLowerCase().endsWith('.xlsx') ? result.filePath : `${result.filePath}.xlsx`;
+    fs.writeFileSync(filePath, Buffer.from(await createTemplateBuffer('teacher-opening-balances')));
+    return { canceled: false, filePath };
+  });
+  ipcMain.handle('payouts:importOpeningBalances', async () => {
+    const user = requireUser();
+    const result = await dialog.showOpenDialog(window, {
+      title: 'Import teacher opening balances',
+      properties: ['openFile'],
+      filters: [{ name: 'Excel workbook', extensions: ['xlsx'] }]
+    });
+    if (result.canceled || !result.filePaths.length) return { canceled: true };
+    const filePath = result.filePaths[0];
+    const { size } = fs.statSync(filePath);
+    if (size > 20 * 1024 * 1024) throw new Error('Excel files must be 20 MB or smaller.');
+    const records = await parseExcelRecords(await fs.promises.readFile(filePath), 'teacher-opening-balances');
+    const db = getDatabase();
+    const rows = records.map((record, index) => {
+      const matches = db.prepare('SELECT tid FROM teachers WHERE oid=? AND name=? COLLATE NOCASE')
+        .all(user.oid, record.name);
+      if (matches.length !== 1) {
+        throw new Error(`Row ${index + 2}: ${matches.length ? 'teacher name is ambiguous' : 'teacher was not found'} in this tuition centre: ${record.name}.`);
+      }
+      return { tid: matches[0].tid, amount: record.opening_balance, notes: record.notes || '' };
+    });
+    if (new Set(rows.map(row => row.tid)).size !== rows.length) {
+      throw new Error('The Excel file contains more than one opening balance for the same teacher.');
+    }
+    if (rows.some(row => row.notes.length > 500)) throw new Error('Opening balance notes must be 500 characters or fewer.');
+    const save = db.prepare(`INSERT INTO teacher_opening_balances (tid,opening_amount,notes)
+      VALUES (?,?,?) ON CONFLICT(tid) DO UPDATE SET
+      opening_amount=excluded.opening_amount,notes=excluded.notes,updated_at=CURRENT_TIMESTAMP`);
+    db.transaction(() => rows.forEach(row => save.run(row.tid, row.amount, row.notes)))();
+    return { canceled: false, count: rows.length, fileName: path.basename(filePath) };
+  });
   ipcMain.handle('settings:organization', () => {
     const oid = org();
     const db = getDatabase();
@@ -1431,26 +1604,39 @@ function registerIpc() {
     const lastSuccessful = getDatabase().prepare(`SELECT created_at,backup_type FROM backup_logs
       WHERE oid=? AND status='success' AND backup_type IN ('google-manual','google-scheduled')
       ORDER BY backup_id DESC LIMIT 1`).get(user.oid) || null;
+    const lastSuccessfulLocal = getDatabase().prepare(`SELECT created_at FROM backup_logs
+      WHERE oid=? AND status='success' AND backup_type IN ('local','local-scheduled')
+      ORDER BY backup_id DESC LIMIT 1`).get(user.oid) || null;
+    const schedule = parseWeeklySchedule(settings);
     let nextScheduled = null;
     if (settings.auto_enabled) {
       const now = new Date();
-      const [hour, minute] = settings.backup_time.split(':').map(Number);
-      const candidate = new Date(now);
-      candidate.setHours(hour, minute, 0, 0);
-      if (candidate <= now || settings.last_scheduled_date === backupLocalDate(now)) {
-        candidate.setDate(candidate.getDate() + 1);
+      for (let offset = 0; offset < 8 && !nextScheduled; offset += 1) {
+        const day = new Date(now);
+        day.setDate(day.getDate() + offset);
+        for (const time of (schedule[String(day.getDay())] || []).slice().sort()) {
+          const [hour, minute] = time.split(':').map(Number);
+          const candidate = new Date(day);
+          candidate.setHours(hour, minute, 0, 0);
+          const slot = `${backupLocalDate(candidate)}T${time}`;
+          if (candidate > now && slot > (settings.last_scheduled_slot || '')) {
+            nextScheduled = candidate.toISOString();
+            break;
+          }
+        }
       }
-      nextScheduled = candidate.toISOString();
     }
     return {
       settings: {
         googleClientId: settings.google_client_id,
         googleClientSecretConfigured: Boolean(driveService.getClientSecret(user.oid)),
         autoEnabled: Boolean(settings.auto_enabled),
-        backupTime: settings.backup_time,
+        weeklySchedule: schedule,
+        localBackupDirectory: settings.local_backup_directory || defaultLocalBackupDirectory(),
         retention: settings.retention,
         missedRecovery: Boolean(settings.missed_recovery),
         lastScheduledDate: settings.last_scheduled_date,
+        lastScheduledSlot: settings.last_scheduled_slot,
         lastStatus: settings.last_status,
         lastError: settings.last_error,
         lastBackupAt: settings.last_backup_at,
@@ -1459,6 +1645,7 @@ function registerIpc() {
       connected,
       passphraseConfigured: Boolean(driveService.getPassphrase(user.oid)),
       lastSuccessful,
+      lastSuccessfulLocal,
       history
     };
   });
@@ -1466,7 +1653,8 @@ function registerIpc() {
     const user = requireUser();
     const clientId = String(input.googleClientId || '').trim();
     const clientSecret = String(input.googleClientSecret || '').trim();
-    const backupTime = String(input.backupTime || '');
+    const schedule = validateWeeklySchedule(input.weeklySchedule);
+    const backupTime = Object.values(schedule).flat()[0] || '15:00';
     const retention = String(input.retention || '');
     const autoEnabled = input.autoEnabled === true ? 1 : input.autoEnabled === false ? 0 : null;
     const missedRecovery = input.missedRecovery === true ? 1 : input.missedRecovery === false ? 0 : null;
@@ -1475,7 +1663,6 @@ function registerIpc() {
     }
     if (clientSecret.length > 1024) throw new Error('Enter a valid Google OAuth Client Secret.');
     if (clientSecret && !clientId) throw new Error('Enter the Google OAuth Client ID before saving its Client Secret.');
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(backupTime)) throw new Error('Choose a valid local backup time.');
     if (!['7', '30', 'all'].includes(retention)) throw new Error('Choose a valid backup retention setting.');
     if (autoEnabled === null || missedRecovery === null) throw new Error('Choose valid automatic and missed-backup settings.');
     const passphrase = String(input.recoveryPassphrase || '');
@@ -1491,15 +1678,16 @@ function registerIpc() {
     if (clientId !== current.google_client_id || (clientSecret && clientSecret !== currentClientSecret)) {
       driveService.clearConnection(user.oid);
     }
-    getDatabase().prepare(`UPDATE backup_settings SET google_client_id=?,auto_enabled=?,backup_time=?,retention=?,
-      missed_recovery=? WHERE oid=?`).run(clientId, autoEnabled, backupTime, retention, missedRecovery, user.oid);
-    if (backupScheduler) void backupScheduler.checkStartup().catch(error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error)));
+    getDatabase().prepare(`UPDATE backup_settings SET google_client_id=?,auto_enabled=?,backup_time=?,weekly_schedule=?,
+      retention=?,missed_recovery=? WHERE oid=?`)
+      .run(clientId, autoEnabled, backupTime, JSON.stringify(schedule), retention, missedRecovery, user.oid);
+    if (backupScheduler) void backupScheduler.checkStartup().catch(error => console.error('Scheduled backup failed:', backupErrorMessage(error)));
     return true;
   });
   ipcMain.handle('backup:googleConnect', async () => {
     const user = requireUser();
     const result = await driveService.connect(user.oid);
-    if (backupScheduler) void backupScheduler.check().catch(error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error)));
+    if (backupScheduler) void backupScheduler.check().catch(error => console.error('Scheduled backup failed:', backupErrorMessage(error)));
     return result;
   });
   ipcMain.handle('backup:googleDisconnect', () => driveService.disconnect(org()));
@@ -1626,17 +1814,16 @@ app.whenReady().then(() => {
     shell,
     getWindow: () => window,
     onConnectionChanged: () => {
-      if (backupScheduler) void backupScheduler.check().catch(error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error)));
+      if (backupScheduler) void backupScheduler.check().catch(error => console.error('Scheduled backup failed:', backupErrorMessage(error)));
     }
   });
   backupScheduler = createBackupScheduler({
     getSettings: () => {
       if (!activeUser) return null;
-      const settings = getBackupSettings(activeUser.oid);
-      return driveService.status(activeUser.oid).connected ? settings : null;
+      return getBackupSettings(activeUser.oid);
     },
-    runScheduled: date => runGoogleBackup('google-scheduled', date),
-    onError: error => console.error('Scheduled cloud backup failed:', backupErrorMessage(error))
+    runScheduled: slot => runScheduledBackups(slot),
+    onError: error => console.error('Scheduled backup failed:', backupErrorMessage(error))
   });
   registerIpc();
   scheduleSessionAutoEnd();

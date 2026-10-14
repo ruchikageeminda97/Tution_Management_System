@@ -84,7 +84,7 @@ function openDatabase(filePath) {
 
 function migrateBackupSettings(database) {
   const version = database.pragma('user_version', { simple: true });
-  if (version >= 2) return;
+  if (version >= 3) return;
   const migrate = database.transaction(() => {
     const backupColumns = new Set(database.pragma('table_info(backup_logs)').map(column => column.name));
     if (!backupColumns.has('error_message')) {
@@ -94,7 +94,26 @@ function migrateBackupSettings(database) {
     if (!settingsColumns.has('retry_after')) {
       database.exec('ALTER TABLE backup_settings ADD COLUMN retry_after TEXT');
     }
-    database.pragma('user_version = 2');
+    if (!settingsColumns.has('weekly_schedule')) {
+      database.exec("ALTER TABLE backup_settings ADD COLUMN weekly_schedule TEXT NOT NULL DEFAULT '{}'");
+      const settings = database.prepare('SELECT oid,backup_time FROM backup_settings').all();
+      const updateSchedule = database.prepare('UPDATE backup_settings SET weekly_schedule=? WHERE oid=?');
+      for (const setting of settings) {
+        const times = {};
+        for (let day = 0; day < 7; day += 1) times[day] = [setting.backup_time || '15:00'];
+        updateSchedule.run(JSON.stringify(times), setting.oid);
+      }
+    }
+    if (!settingsColumns.has('local_backup_directory')) {
+      database.exec('ALTER TABLE backup_settings ADD COLUMN local_backup_directory TEXT');
+    }
+    if (!settingsColumns.has('last_scheduled_slot')) {
+      database.exec('ALTER TABLE backup_settings ADD COLUMN last_scheduled_slot TEXT');
+      database.exec(`UPDATE backup_settings
+        SET last_scheduled_slot=last_scheduled_date || 'T' || COALESCE(backup_time,'15:00')
+        WHERE last_scheduled_date IS NOT NULL`);
+    }
+    database.pragma('user_version = 3');
   });
   migrate();
 }
